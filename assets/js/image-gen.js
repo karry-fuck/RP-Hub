@@ -718,7 +718,8 @@
         );
         if (!fileRes.ok) continue;
         const data = await fileRes.json();
-        const api = graphToPrompt(data, objectInfo);
+        // 用内部拉取的完整 object_info（外部可能未传 objectInfo，传空则节点全被跳过）
+        const api = graphToPrompt(data, info);
         injectComfyPlaceholders(api);
         const name = String(f).replace(/\.json$/i, "");
         result[name] = api;
