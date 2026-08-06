@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **无 Node 环境、无构建步骤、无依赖安装**：直接双击打开 `index.html` 即可运行全部核心功能（README 明确说明）。
 - 少数功能（角色卡工坊预览、正则沉浸式渲染等）在 `file://` 协议下可能受跨域限制，此时用本地静态服务器运行目录，例如 `python3 -m http.server`。
 - 本项目**没有** lint / test / build 命令，也没有自动化测试框架。修改代码后验证方式为在浏览器中手动打开 `index.html` 检查功能，并查看浏览器控制台无报错。
-- 脚本通过 `document.write` + `?v=` 参数加载（`index.html` 末尾），调试时改 JS 后记得同步递增版本号，避免浏览器缓存旧文件。
+- 脚本通过 `document.write` + `?v=` 参数加载（`index.html` 末尾约 10120-10140 行）；`?v=` 用 `new Date().getTime()` **自动生成**，改 JS 后刷新即自动避开浏览器缓存，**无需手动递增版本号**。
 
 ## 架构
 
@@ -24,13 +24,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### 文件布局
 
 - `index.html` — 主应用（界面模板 + Vue 应用）
-- `assets/js/app.js` — 核心业务逻辑（约 12k 行，单个大型 setup 函数）
+- `assets/js/app.js` — 核心业务逻辑（约 16.8k 行，单个大型 setup 函数）
 - `assets/js/card-utils.js` — `window.RPHubCardUtils`：角色卡 PNG chunk（tEXt `chara`）解析、`transformUnprotectedText`、导出辅助
-- `assets/js/image-gen.js` — `window.RPHubImageGen`：生图多 provider（sta1n / OpenAI 兼容 / ComfyUI）生成函数、任务队列、占位 HTML、ComfyUI `/object_info` 拉取与 graph→API workflow 转换
+- `assets/js/image-gen.js` — `window.RPHubImageGen`：生图多 provider（sta1n / OpenAI 兼容 / ComfyUI）生成函数、任务队列、占位 HTML、ComfyUI `/object_info` 拉取、graph→API workflow 转换、关键节点识别与占位符注入
 - `assets/js/ui-select.js` — `window.RPHubCustomSelect`：全局自定义下拉组件（teleport 到 body、动态定位、分组）
 - `assets/js/utils.js` — `generateUUID`、`parseCot`（CoT 解析）
 - `assets/css/styles.css` — 核心样式（滚动条、markdown、CoT UI、剧情路线图、UI 模板样式等）
 - `character/index.html` — 角色卡工坊（独立 Vue 应用）
+- `docs/*.md` — 各子系统实现文档（对话/记忆/世界书/正则/生图设置/UI模板/主动工具/剧情分支/角色卡工坊），含行号定位（基于 1.8.0）；改动相应子系统前先读对应文档
 
 ### 数据持久化
 
@@ -45,7 +46,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **记忆系统**：向量模式（embedding API，int8 量化 `embeddingQ`/`embeddingScale`，余弦相似度 top-K 10-20，阈值 40-70%）；经典模式（LLM 每轮摘要，三档长度 50-80 / 100-130 / 200-250 字，`buildClassicSummaryJob`）。
 - **世界书 World Info**：触发词/正则、插入位置（system_top / global_note / before_char / after_char / at_depth / user_top / assistant_top）、概率、常驻条目、scanDepth。`normalizeWorldInfoEntry` 兼容 SillyTavern 位置映射（posNameMap、数字位置 0-4）。
 - **正则脚本**：`processRegex` 用 `transformUnprotectedText` 保护 HTML/代码块；内置 NAI画图正则 + `Auto Replace {{user}}` 默认脚本；`enforceSpecialRules()` 全局注入。
-- **生图服务**：三后端（`settings.imageProvider`）——sta1n 直链 / OpenAI 兼容 `/v1/images/generations` / ComfyUI 浏览器直连。对话内 `image###提示词###` 走"占位 + 异步填图"（MutationObserver 扫描 + 并发 3 任务队列 + 失败重试）；ComfyUI 支持 `/object_info` 拉取节点参数、`/api/userdata` 拉取服务端已保存工作流（LiteGraph graph→API 转换 + 占位符注入）、自定义分辨率。核心逻辑在 `assets/js/image-gen.js`。
+- **生图服务**：三后端（`settings.imageProvider`）——sta1n 直链 / OpenAI 兼容 `/v1/images/generations` / ComfyUI 浏览器直连。对话内 `image###提示词###` 走"占位 + 异步填图"（MutationObserver 扫描 + 并发 3 任务队列 + 失败重试）。**ComfyUI 工作流（跨 image-gen.js + app.js + index.html）**：`fetchComfyObjectInfo` 从 `/object_info` 拉取模型/sampler/scheduler/lora 列表；`fetchComfyServerWorkflows` 从 `/api/userdata` 拉服务端已保存工作流（LiteGraph graph→API 转换）；`detectComfyNodes` 识别采样器/分辨率/Lora 节点，`injectComfyPlaceholders` 按节点三态选择（auto/具体id/none）克隆注入 `%model%/%prompt%/%steps%/%scale%/%width%/%lora%` 等占位符，生成前 `fillComfyWorkflow` 用全局 settings 值填充；UI 含集中式 KSampler 参数区块、Lora 加载器（含强度）、工作流 JSON 导入（LiteGraph/API 自动检测）。详见 `docs/settings-and-api.md` 8.3。
 - **UI 模板**：HTML 模板 + 变量状态（`variableSchema`/`changeLog`），sandboxed iframe 渲染，`<ui_template_updates>` 由 AI 更新变量，每个角色独立运行时状态。
 - **Active Tools**：XML 标签驱动工具调用（`<tool_memory_add:...>`、`<tool_grep_...>`、`<tool_web_...>`），Tavily 网页搜索，攻击性分级 force/active/adaptive，检测/晋升/执行后以 `<active_tool_result>` 回填。
 - **剧情分支**：`createStoryBranch` 分叉聊天/记忆/UI 模板运行时状态，`storyRouteMap` SVG 路线图，级联删除，NDJSON 导出。
