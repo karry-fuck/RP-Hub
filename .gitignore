@@ -1,0 +1,9 @@
+# Playwright MCP 临时目录
+.playwright-mcp/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
