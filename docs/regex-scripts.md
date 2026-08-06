@@ -1,7 +1,7 @@
 # 正则脚本（Regex Scripts）实现文档
 
 > 本文件说明 RP-Hub 正则脚本的执行引擎与调用场景。
-> 源码位置：`assets/js/app.js`（`processRegex` 等）与 `assets/js/card-utils.js`（`transformUnprotectedText`）。行号基于当前 main 分支版本 1.7.9。
+> 源码位置：`assets/js/app.js`（`processRegex` 等）与 `assets/js/card-utils.js`（`transformUnprotectedText`）。行号基于当前 main 分支版本 1.8.0。
 
 ---
 

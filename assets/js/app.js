@@ -332,21 +332,21 @@ createApp({
         el.scrollHeight - el.scrollTop - el.clientHeight < 10;
     };
     const latestUpdate = reactive({
-      id: 10161, // 确保这是一个五位数ID，每次更新内容时增加这个数字
+      id: 10162, // 确保这是一个五位数ID，每次更新内容时增加这个数字
       date: new Date().toISOString().split("T")[0],
       title: "网站公告",
       content: `
-### RP-Hub 1.7.9
+### RP-Hub 1.8.0
 
-- 新增“剧情分支”系统
-- 新增纵向剧情分支图
-- 优化了网页空间统计
-- 优化了用量统计
-- 优化了部分页面布局
+- 新增 ComfyUI 工作流节点识别与选择（采样器/分辨率/正负提示词节点）
+- 新增集中式 KSampler 参数区块（步数/CFG/采样器/调度器/降噪）
+- 新增"导入工作流 JSON"，自动检测格式、导入即生效
+- 服务端工作流加载后显示到预览区
+- 修复 ComfyUI 提交校验 KeyError 与旧式工作流参数错位
 
 本项目为全开源公益项目，严禁倒卖源码，二改需经作者授权
 
-#### 更新时间：08/04/22:08
+#### 更新时间：08/06
                     `,
     });
 

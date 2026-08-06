@@ -1,7 +1,7 @@
 # 主动工具（Active Tools）实现文档
 
 > 本文件说明 RP-Hub 主动工具系统的实现：XML 标签驱动的工具调用、检测/执行/结果回填闭环、Tavily 联网与自动续写。
-> 源码位置：`assets/js/app.js` 与 `index.html`。行号基于当前 main 分支版本 1.7.9。
+> 源码位置：`assets/js/app.js` 与 `index.html`。行号基于当前 main 分支版本 1.8.0。
 
 ---
 

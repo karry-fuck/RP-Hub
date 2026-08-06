@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-**Roleplay Hub（RP-Hub）**：一款纯前端运行的本地角色扮演（Roleplay）对话 + 角色卡生成工具。支持 OpenAI 兼容 API 的流式对话、向量/经典双模式记忆、世界书、正则脚本、UI 模板、主动工具调用、剧情分支、角色卡（PNG/JSON）导入导出与 AI 生成角色卡。版本 1.7.9。
+**Roleplay Hub（RP-Hub）**：一款纯前端运行的本地角色扮演（Roleplay）对话 + 角色卡生成工具。支持 OpenAI 兼容 API 的流式对话、向量/经典双模式记忆、世界书、正则脚本、UI 模板、主动工具调用、剧情分支、角色卡（PNG/JSON）导入导出与 AI 生成角色卡。版本 1.8.0。
 
 **许可证：CC BY-NC 4.0**（知识共享-署名-非商业性使用），**明确禁止任何商业化使用**。详见 `LICENSE`。
 

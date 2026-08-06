@@ -1,7 +1,7 @@
 # UI 模板实现文档
 
 > 本文件说明 RP-Hub UI 模板的实现：模板渲染引擎、AI 变量更新、运行时状态与沙箱 iframe 安全机制。
-> 源码位置：`assets/js/app.js` 与 `index.html`。行号基于当前 main 分支版本 1.7.9。
+> 源码位置：`assets/js/app.js` 与 `index.html`。行号基于当前 main 分支版本 1.8.0。
 
 ---
 

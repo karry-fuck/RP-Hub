@@ -1,7 +1,7 @@
 # 设置与 API 连接实现文档
 
 > 本文件说明 RP-Hub 的设置系统与 API 连接：设置面板结构、用户设置（user）中真正被 AI 使用的字段、settings 数据模型全字段、API 提供商管理、端点拼接、鉴权、三档模型、模型列表拉取、连接状态检查、错误处理、用量统计与生图服务（sta1n / OpenAI 兼容 / ComfyUI 三后端 + 占位异步填图 + 服务端工作流拉取）。
-> 源码位置：`assets/js/app.js` 与 `index.html`。行号基于当前 main 分支版本 1.7.9。
+> 源码位置：`assets/js/app.js` 与 `index.html`。行号基于当前 main 分支版本 1.8.0。
 
 ---
 

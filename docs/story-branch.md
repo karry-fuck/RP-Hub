@@ -1,7 +1,7 @@
 # 剧情分支（Story Branch）实现文档
 
 > 本文件说明 RP-Hub 剧情分支系统的实现：作用域隔离的数据模型、分支创建/切换/删除、SVG 路线图渲染与 NDJSON 导入导出。
-> 源码位置：`assets/js/app.js` 与 `index.html`。行号基于当前 main 分支版本 1.7.9。
+> 源码位置：`assets/js/app.js` 与 `index.html`。行号基于当前 main 分支版本 1.8.0。
 
 ---
 

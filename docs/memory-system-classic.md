@@ -1,7 +1,7 @@
 # 经典模式记忆（LLM 逐轮摘要）实现文档
 
 > 本文件说明 RP-Hub 经典模式（总结模式）记忆的实现：逐轮摘要提取与原地上下文压缩。
-> 源码位置：`assets/js/app.js`。行号基于当前 main 分支版本 1.7.9。
+> 源码位置：`assets/js/app.js`。行号基于当前 main 分支版本 1.8.0。
 > 向量模式见 [`memory-system.md`](./memory-system.md)。
 
 ---

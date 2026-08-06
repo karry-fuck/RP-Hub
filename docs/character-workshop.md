@@ -1,7 +1,7 @@
 # 角色卡工坊（Character Workshop）实现文档
 
 > 本文件说明 RP-Hub 角色卡工坊（`character/index.html`）的实现：独立 Vue 应用、与主程序 postMessage 同步、AI 生成角色卡、Diff 修改、头像生图与预览渲染。
-> 源码位置：`character/index.html`。行号基于当前 main 分支版本 1.7.9。角色卡解析/导出底层复用 `window.RPHubCardUtils`（`assets/js/card-utils.js`）。
+> 源码位置：`character/index.html`。行号基于当前 main 分支版本 1.8.0。角色卡解析/导出底层复用 `window.RPHubCardUtils`（`assets/js/card-utils.js`）。
 
 ---
 
