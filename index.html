@@ -4112,6 +4112,73 @@
                         </p>
                       </div>
 
+                      <!-- Lora 加载器 -->
+                      <div class="generation-setting-card">
+                        <label
+                          class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2"
+                          >Lora 加载器</label
+                        >
+                        <div class="grid grid-cols-2 gap-2">
+                          <div>
+                            <label class="block text-xs text-gray-400 mb-1"
+                              >Lora 节点</label
+                            >
+                            <custom-select
+                              v-model="settings.comfyLoraNodeId"
+                              :options="comfyLoraNodeOptions"
+                              button-class="w-full rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-teal-400 focus:ring-teal-100"
+                              menu-class="text-sm"
+                            >
+                            </custom-select>
+                          </div>
+                          <div>
+                            <label class="block text-xs text-gray-400 mb-1"
+                              >Lora 文件</label
+                            >
+                            <custom-select
+                              v-model="settings.comfyLora"
+                              :options="comfyLoraOptions"
+                              :disabled="!comfyLoraActive"
+                              button-class="w-full rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-teal-400 focus:ring-teal-100"
+                              menu-class="text-sm"
+                            >
+                            </custom-select>
+                          </div>
+                          <div>
+                            <label class="block text-xs text-gray-400 mb-1"
+                              >强度 model</label
+                            >
+                            <input
+                              v-model.number="settings.comfyLoraStrengthModel"
+                              type="number"
+                              min="0"
+                              max="2"
+                              step="0.05"
+                              :disabled="!comfyLoraActive || !settings.comfyLora"
+                              class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm disabled:cursor-not-allowed disabled:opacity-60"
+                            />
+                          </div>
+                          <div>
+                            <label class="block text-xs text-gray-400 mb-1"
+                              >强度 clip</label
+                            >
+                            <input
+                              v-model.number="settings.comfyLoraStrengthClip"
+                              type="number"
+                              min="0"
+                              max="2"
+                              step="0.05"
+                              :disabled="!comfyLoraActive || !settings.comfyLora"
+                              class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm disabled:cursor-not-allowed disabled:opacity-60"
+                            />
+                          </div>
+                        </div>
+                        <p class="mt-2 text-xs text-gray-400">
+                          工作流含 Lora 节点时自动激活（控制第一个）；选中文件后注入
+                          %lora% 等占位符，"无（保持工作流原值）"不改动内置 Lora
+                        </p>
+                      </div>
+
                       <!-- KSampler 参数：节点选择 + 5 字段网格 -->
                       <div
                         class="generation-setting-card col-span-1 md:col-span-2"
@@ -4276,7 +4343,7 @@
                           v-model="comfyWorkflowDraft"
                           rows="8"
                           class="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-gray-700 text-sm font-mono focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm resize-y custom-scrollbar"
-                          placeholder="粘贴工作流 JSON，占位符 %prompt% %negative_prompt% %seed% %steps% %scale% %sampler% %scheduler% %model% %width% %height% %denoise%"
+                          placeholder="粘贴工作流 JSON，占位符 %prompt% %negative_prompt% %seed% %steps% %scale% %sampler% %scheduler% %model% %lora% %lora_strength_model% %lora_strength_clip% %width% %height% %denoise%"
                         ></textarea>
                         <div class="flex gap-2 mt-2 flex-wrap">
                           <button

@@ -129,7 +129,7 @@
   };
 
   // 文本类占位符（值可能含引号/换行，需 JSON 字符串转义）与简单值占位符
-  const TEXT_PLACEHOLDERS = ["prompt", "negative_prompt"];
+  const TEXT_PLACEHOLDERS = ["prompt", "negative_prompt", "lora"];
   const SIMPLE_PLACEHOLDERS = [
     "model",
     "seed",
@@ -140,6 +140,8 @@
     "width",
     "height",
     "denoise",
+    "lora_strength_model",
+    "lora_strength_clip",
   ];
 
   /**
@@ -381,14 +383,19 @@
       sampler: settings.comfySampler || "euler",
       scheduler: settings.comfyScheduler || "normal",
       model: settings.comfyModel || "",
+      lora: settings.comfyLora || "",
+      lora_strength_model: Number(settings.comfyLoraStrengthModel),
+      lora_strength_clip: Number(settings.comfyLoraStrengthClip),
       width: resolution.width,
       height: resolution.height,
     };
 
-    // 注入占位符（选择目标采样器/分辨率节点，不污染工作流缓存）后再填充实际值
+    // 注入占位符（选择目标采样器/分辨率/Lora 节点，不污染工作流缓存）后再填充实际值
     const injected = injectComfyPlaceholders(workflow, {
       samplerNodeId: settings.comfySamplerNodeId || "auto",
       latentNodeId: settings.comfyResolutionNodeId || "auto",
+      loraNodeId: settings.comfyLoraNodeId || "none",
+      loraName: settings.comfyLora || "",
     });
     const filled = fillComfyWorkflow(injected, vars);
 
@@ -458,10 +465,10 @@
   // ---- ComfyUI /object_info ----
 
   /**
-   * 拉取 ComfyUI 模型/sampler/scheduler 列表
+   * 拉取 ComfyUI 模型/sampler/scheduler/lora 列表
    *
    * @param {string} comfyUrl
-   * @returns {Promise<{models: string[], samplers: string[], schedulers: string[]}>}
+   * @returns {Promise<{models: string[], samplers: string[], schedulers: string[], loras: string[]}>}
    */
   const fetchComfyObjectInfo = async (comfyUrl) => {
     const url = String(comfyUrl || "")
@@ -478,10 +485,16 @@
       info?.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0] || [];
     const samplers = info?.KSampler?.input?.required?.sampler_name?.[0] || [];
     const schedulers = info?.KSampler?.input?.required?.scheduler?.[0] || [];
+    // Lora 文件：合并常见加载器列表并去重（顺序稳定）
+    const loras = [
+      ...(info?.LoraLoader?.input?.required?.lora_name?.[0] || []),
+      ...(info?.LoraLoaderModelOnly?.input?.required?.lora_name?.[0] || []),
+    ];
+    const lorasDeduped = [...new Set(loras)];
 
     if (!models.length)
       throw new Error("未找到可用模型（CheckpointLoaderSimple）");
-    return { models, samplers, schedulers };
+    return { models, samplers, schedulers, loras: lorasDeduped };
   };
 
   /**
@@ -660,6 +673,10 @@
     "CLIPTextEncodeFlux",
     "CLIPTextEncodeAuraFlow",
   ]);
+  // Lora 加载器：除已知类外，凡含 lora_name 输入视为 Lora 节点（兼容自定义加载器）
+  const LORA_TYPES = new Set(["LoraLoader", "LoraLoaderModelOnly"]);
+  const isLoraNode = (cls, inp) =>
+    LORA_TYPES.has(cls) || Boolean(inp && "lora_name" in inp);
 
   /**
    * 在 API prompt 中注入动态占位符，使工作流复用本应用参数
@@ -667,16 +684,22 @@
    *  - 目标 Empty*LatentImage 宽高 → %width%/%height%
    *  - 目标 KSampler* 采样参数 → %seed%/%steps%/%scale%/%sampler%/%scheduler%/%denoise%
    *  - 正/负 CLIPTextEncode.text → %prompt%/%negative_prompt%（始终注入，按参考采样器推导）
+   *  - 目标 Lora 节点（选中且提供 loraName）→ %lora%/%lora_strength_model%/%lora_strength_clip%
    *
-   * 节点选择三态（samplerNodeId / latentNodeId）：
+   * 节点选择三态（samplerNodeId / latentNodeId / loraNodeId）：
    *  - "auto" / 缺省 → 取工作流中第一个该类节点
    *  - 具体 id       → 字符串精确匹配
    *  - "none"        → 不注入该类参数（正/负提示词除外，仍按第一个采样器推导，避免空图）
+   *
+   * Lora 特殊规则：仅当 loraNodeId 命中节点且 loraName 非空时才注入（未选 Lora 文件
+   * 时保持工作流内置 Lora 原值，不误改节点）。
    *
    * @param {object} apiPrompt  { nodeId: { class_type, inputs } }
    * @param {object} [opts]
    * @param {string} [opts.samplerNodeId="auto"]
    * @param {string} [opts.latentNodeId="auto"]
+   * @param {string} [opts.loraNodeId="none"]
+   * @param {string} [opts.loraName=""] 选中的 Lora 文件名，空则跳过 Lora 注入
    * @returns {object} 注入后的新对象（不修改入参）
    */
   const injectComfyPlaceholders = (apiPrompt, opts = {}) => {
@@ -684,10 +707,13 @@
     const target = JSON.parse(JSON.stringify(apiPrompt || {}));
     const samplerNodeId = opts.samplerNodeId || "auto";
     const latentNodeId = opts.latentNodeId || "auto";
+    const loraNodeId = opts.loraNodeId || "none";
+    const loraName = String(opts.loraName || "").trim();
 
     const samplers = [];
     const latents = [];
     const encodes = [];
+    const loras = [];
     for (const [id, p] of Object.entries(target)) {
       const cls = p && p.class_type;
       const inp = p && p.inputs;
@@ -700,6 +726,8 @@
         samplers.push(id);
       } else if (CLIP_TEXT_ENCODE_TYPES.has(cls)) {
         encodes.push(id);
+      } else if (isLoraNode(cls, inp)) {
+        loras.push(id);
       }
     }
 
@@ -757,19 +785,37 @@
       if ("height" in inp) inp.height = "%height%";
     }
 
+    // 目标 Lora 节点：none=不控制；auto=第一个；否则精确匹配。
+    // 仅当选中节点且提供了 Lora 文件名时才注入（避免把工作流内置 Lora 误改空/被覆盖）
+    let targetLora = null;
+    if (loraNodeId === "none") targetLora = null;
+    else if (loraNodeId === "auto" || loraNodeId === "")
+      targetLora = loras[0] || null;
+    else
+      targetLora = loras.includes(String(loraNodeId))
+        ? String(loraNodeId)
+        : null;
+    if (targetLora && loraName) {
+      const inp = target[targetLora].inputs;
+      if ("lora_name" in inp) inp.lora_name = "%lora%";
+      if ("strength_model" in inp) inp.strength_model = "%lora_strength_model%";
+      if ("strength_clip" in inp) inp.strength_clip = "%lora_strength_clip%";
+    }
+
     return target;
   };
 
   /**
-   * 识别工作流中的关键节点：采样器、分辨率（Empty*LatentImage）节点
+   * 识别工作流中的关键节点：采样器、分辨率（Empty*LatentImage）、Lora 节点
    * 采样器附带其 positive/negative 引用的节点 id（用于正/负提示词跟随所选采样器）
    *
    * @param {object} apiPrompt  { nodeId: { class_type, inputs } }
-   * @returns {{samplers: Array<{id:string,classType:string,positiveId:string|null,negativeId:string|null}>, latents: Array<{id:string,classType:string}>}}
+   * @returns {{samplers: Array<{id:string,classType:string,positiveId:string|null,negativeId:string|null}>, latents: Array<{id:string,classType:string}>, loras: Array<{id:string,classType:string}>}}
    */
   const detectComfyNodes = (apiPrompt) => {
     const samplers = [];
     const latents = [];
+    const loras = [];
     for (const [id, p] of Object.entries(apiPrompt || {})) {
       const cls = p && p.class_type;
       const inp = p && p.inputs;
@@ -789,9 +835,11 @@
         });
       } else if (EMPTY_LATENT_TYPES.has(cls)) {
         latents.push({ id: String(id), classType: cls });
+      } else if (isLoraNode(cls, inp)) {
+        loras.push({ id: String(id), classType: cls });
       }
     }
-    return { samplers, latents };
+    return { samplers, latents, loras };
   };
 
   /**

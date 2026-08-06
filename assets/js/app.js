@@ -338,10 +338,11 @@ createApp({
       content: `
 ### RP-Hub 1.8.0
 
-- 新增 ComfyUI 工作流节点识别与选择（采样器/分辨率/正负提示词节点）
+- 新增 ComfyUI 工作流节点识别与选择（采样器/分辨率/Lora/正负提示词节点）
 - 新增集中式 KSampler 参数区块（步数/CFG/采样器/调度器/降噪）
 - 新增"导入工作流 JSON"，自动检测格式、导入即生效
 - 服务端工作流加载后显示到预览区
+- 新增 Lora 加载器选择（含强度控制），工作流含 Lora 节点时自动激活
 - 修复 ComfyUI 提交校验 KeyError 与旧式工作流参数错位
 
 本项目为全开源公益项目，严禁倒卖源码，二改需经作者授权
@@ -746,6 +747,11 @@ createApp({
       comfyCustomResolution: "832x1216",
       comfySamplerNodeId: "auto",
       comfyResolutionNodeId: "auto",
+      // Lora：节点默认 auto（有 Lora 节点即激活控制，无则自然 no-op）；文件默认空（保持工作流原值）
+      comfyLoraNodeId: "auto",
+      comfyLora: "",
+      comfyLoraStrengthModel: 1,
+      comfyLoraStrengthClip: 1,
       qualityModel: DEFAULT_API_CONFIG.qualityModel,
       balancedModel: DEFAULT_API_CONFIG.balancedModel,
       fastModel: DEFAULT_API_CONFIG.fastModel,
@@ -3520,7 +3526,12 @@ image###描述###
     };
 
     // ===== 生图服务多 provider：ComfyUI 接线 =====
-    const comfyObjectInfo = ref({ models: [], samplers: [], schedulers: [] });
+    const comfyObjectInfo = ref({
+      models: [],
+      samplers: [],
+      schedulers: [],
+      loras: [],
+    });
     // 服务端已保存工作流（运行时从 {comfyUrl}/api/userdata?dir=workflows 拉取，不持久化）
     const comfyServerWorkflows = ref({});
     // 导入的工作流（会话级，刷新即失）：{ name, workflow }
@@ -3617,6 +3628,14 @@ image###描述###
         label: s,
       })),
     );
+    // Lora 文件：空值 = 保持工作流内置 Lora 原值
+    const comfyLoraOptions = computed(() => [
+      { value: "", label: "无（保持工作流原值）" },
+      ...(comfyObjectInfo.value.loras || []).map((l) => ({
+        value: l,
+        label: l,
+      })),
+    ]);
 
     const comfyWorkflowDraft = ref("");
 
@@ -3635,7 +3654,7 @@ image###描述###
     const detectedComfyNodes = computed(() => {
       const draft = parsedComfyDraft.value;
       if (!draft || typeof draft !== "object")
-        return { samplers: [], latents: [] };
+        return { samplers: [], latents: [], loras: [] };
       return window.RPHubImageGen.detectComfyNodes(draft);
     });
     const comfySamplerNodeOptions = computed(() => {
@@ -3659,6 +3678,23 @@ image###描述###
         })),
         { value: "none", label: "无（不控制分辨率）" },
       ];
+    });
+    // Lora 节点：与采样器同构的三态选择
+    const comfyLoraNodeOptions = computed(() => {
+      const { loras } = detectedComfyNodes.value;
+      return [
+        { value: "auto", label: "自动（第一个 Lora 节点）" },
+        ...loras.map((l) => ({
+          value: l.id,
+          label: `节点 ${l.id}（${l.classType}）`,
+        })),
+        { value: "none", label: "无（不控制 Lora）" },
+      ];
+    });
+    // Lora 功能是否生效：工作流存在 Lora 节点且节点选择非 none（默认 auto 即按此动态启停）
+    const comfyLoraActive = computed(() => {
+      const { loras } = detectedComfyNodes.value;
+      return loras.length > 0 && settings.comfyLoraNodeId !== "none";
     });
     // 正/负提示词跟随所选采样器；"无"时仍按第一个采样器推导（提示词始终注入）
     const comfyActiveSamplerPosNeg = computed(() => {
@@ -3700,6 +3736,8 @@ image###描述###
       const injected = window.RPHubImageGen.injectComfyPlaceholders(wf, {
         samplerNodeId: settings.comfySamplerNodeId || "auto",
         latentNodeId: settings.comfyResolutionNodeId || "auto",
+        loraNodeId: settings.comfyLoraNodeId || "none",
+        loraName: settings.comfyLora || "",
       });
       comfyWorkflowDraft.value = JSON.stringify(injected, null, 2);
     };
@@ -3970,9 +4008,14 @@ image###描述###
       },
     );
 
-    // 采样器/分辨率节点切换：源驱动覆盖预览（生成不读 textarea，预期行为）
+    // 采样器/分辨率/Lora 节点选择：源驱动覆盖预览（生成不读 textarea，预期行为）
     watch(
-      [() => settings.comfySamplerNodeId, () => settings.comfyResolutionNodeId],
+      [
+        () => settings.comfySamplerNodeId,
+        () => settings.comfyResolutionNodeId,
+        () => settings.comfyLoraNodeId,
+        () => settings.comfyLora,
+      ],
       () => {
         if ((settings.imageProvider || "sta1n") === "comfy")
           loadComfyWorkflowDraft();
@@ -15896,6 +15939,9 @@ ${uiTemplateAnalysisSection}
       comfyModelOptions,
       comfySamplerOptions,
       comfySchedulerOptions,
+      comfyLoraOptions,
+      comfyLoraNodeOptions,
+      comfyLoraActive,
       comfyWorkflowDraft,
       loadComfyWorkflowDraft,
       saveComfyWorkflowAs,
