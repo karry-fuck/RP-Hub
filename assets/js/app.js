@@ -3883,14 +3883,19 @@ image###描述###
         );
       },
       onResolve: async (taskid, src) => {
-        // 持久化到服务器并写回消息对象（不阻塞 DOM 填图）
+        // 1) 生成完成即刻先用原始 src 填图（ComfyUI 输出已就绪，即时显示，不等持久化）
+        applyImageGenResultToAll(taskid, src, null);
+        // 2) 持久化到服务器并写回消息对象，随后覆盖为稳定持久化地址。
+        //    用持久化地址直接填 DOM，不依赖 Vue 重渲染（移动端存在渲染时序差异，
+        //    若只写 msg.images 等重渲染，可能出现图不显示需刷新的问题）。
+        let url = src;
         try {
-          const url = await persistChatImage(src);
+          url = (await persistChatImage(src)) || src;
           if (url) writeBackMessageImages(taskid, url);
         } catch (e) {
           console.warn("聊天图片写回消息失败:", e);
         }
-        applyImageGenResultToAll(taskid, src, null);
+        applyImageGenResultToAll(taskid, url, null);
       },
       onReject: (taskid, errMsg) => {
         applyImageGenResultToAll(taskid, null, errMsg);

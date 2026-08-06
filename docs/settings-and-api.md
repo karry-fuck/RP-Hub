@@ -303,6 +303,8 @@ OpenAI/ComfyUI 异步生成，无法内联进同步 `processRegex`，走"占位 
 4. **扫描**：对 `chatContainer` 挂 MutationObserver（新增节点 + 50ms 防抖）→ `scanPendingImageGen()`（app.js 3749）：查未 `data-resolved` 的占位，会话缓存 `resolvedGenCache[taskid]` 命中直接填 src；未命中组 task 入队。
 5. **队列**：`createImageGenQueue({ concurrency: 3, timeoutMs: 120000 })`，并发 3、AbortController 超时、失败标记节点并显示重试按钮（点击换新 seed 重生成），多图并发各自随机 seed。
 6. **默认 tag 前置**：`imageGenDefaultTags` 在任务构建时拼进 `data-prompt`（`[defaultTags, AI输出].filter(Boolean).join(',')`），不进世界书、不改 AI 输出。
+7. **生成结果即时显示 + 持久化**：`onResolve(taskid, src)`（app.js）先立即用原始 src（ComfyUI 为 `/comfy_api/view`）填 DOM 即时可见，随后 `persistChatImage(src)` 让服务器抓取并落盘到 `images/generated/`，把 `msg.images[taskid]` 写为持久化地址并用它覆盖 DOM。**DOM 填图不依赖 Vue 重渲染**——移动端存在渲染时序差异，若只写 `msg.images` 等响应式重渲染，可能出现"图生成完成却不显示、需刷新"的问题。刷新/重进时 `renderMarkdown` 的 cache key 含图片指纹（`msg.images` key=value 串），命中已完成形态不重新生成。
+8. **失败友好化**：`onReject` 经 `normalizeImageGenError`（image-gen.js）归一化，`is not a function`/`not defined` 等技术性错误转为「当前浏览器环境不兼容」友好提示、超长错误截断 80 字符，重试按钮换新 seed 重生成。
 
 ### 8.3 ComfyUI 节点、工作流与自定义分辨率
 
@@ -319,6 +321,7 @@ OpenAI/ComfyUI 异步生成，无法内联进同步 `processRegex`，走"占位 
 - **KSampler 参数区块与节点选择**：UI 集中展示采样器/调度器/steps/cfg/denoise 五字段（复用全局 `comfySampler`/`comfyScheduler`/`imageGenSteps`/`imageGenCfg`/`imageGenDenoise`）。`settings.comfySamplerNodeId` / `comfyResolutionNodeId`（默认 `"auto"`）选择要控制的工作流节点（`auto`=第一个 / 具体 id / `none`=不控制）；选中节点时注入占位符、由 UI 全权控制，未选中节点保持工作流原值。"无（不控制）"仅关闭采样参数注入，正负提示词仍注入（按第一个采样器推导）。
 - **Lora 加载器**：`settings.comfyLoraNodeId`（默认 `"auto"`——工作流含 Lora 节点即自动激活控制第一个，无 Lora 节点则自然 no-op）、`comfyLora`（默认空 = "无（保持工作流原值）"，选文件才替换内置 Lora）、`comfyLoraStrengthModel`/`comfyLoraStrengthClip`（默认 1）。Lora 文件下拉禁用条件：当前工作流无 Lora 节点或节点选择为"无（不控制）"；强度输入仅在已选 Lora 文件时生效（与注入规则一致：未选文件不注入任何 Lora 占位符）。`comfyLoraActive` computed 驱动 UI 禁用态。
 - **导入工作流 JSON**：`importComfyWorkflow(event)` 读取 `.json` 文件，自动检测格式——LiteGraph 图（`nodes+links`）经 `fetchComfyObjectInfoRaw` + `graphToPrompt` 转换，API 格式（含 `class_type`）直接用；导入即生效（会话级 `comfyImportedWorkflow`，下拉显示 `导入：{名}`），可"保存为工作流"固化到 localStorage，未固化刷新即失；启动时若 `settings.comfyWorkflow` 残留 `import:` 前缀则归一化回 `"default"`。
+- **client_id 兼容（非安全上下文）**：`generateImageWithComfy` 提交 prompt 时 `client_id` 用 `randomUUIDCompat()`（image-gen.js）——优先原生 `crypto.randomUUID`，不可用时降级 Math.random 实现。**原因**：`crypto.randomUUID` 只在安全上下文暴露；手机经局域网 IP（`http://192.168.x.x`）访问为非安全上下文，直接调用会抛 `crypto.randomUUID is not a function`，导致提交中断、图片区域显示技术报错（`normalizeImageGenError` 已把此类错误转为友好提示）。
 
 ### 8.4 状态检查（按 provider 分支）
 

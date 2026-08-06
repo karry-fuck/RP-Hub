@@ -14,6 +14,20 @@
   const DEFAULT_COMFY_BASE_URL = "/comfy_api";
   const DEFAULT_STA1N_BASE_URL = "https://nai.sta1n.cn";
 
+  // 兼容 UUID：优先原生 crypto.randomUUID，不可用（手机经局域网 IP 访问为非安全上下文，
+  // crypto.randomUUID 只暴露在安全上下文，直接调用会抛 "crypto.randomUUID is not a function"）时
+  // 降级 Math.random 实现，保证 ComfyUI 提交不中断。
+  const randomUUIDCompat = () => {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      const v = c === "x" ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  };
+
   // 透明 GIF 占位，加载前不闪烁
   const TRANSPARENT_GIF =
     "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
@@ -268,6 +282,12 @@
     if (message === "Failed to fetch")
       return "网络请求失败，请检查地址、网络与跨域配置";
     if (message.includes("AbortError")) return "生成超时已中止";
+    // 浏览器 API 缺失等环境性错误：手机经局域网 IP（非安全上下文）访问时
+    // crypto.randomUUID 等 API 不可用，这类技术错误不直接抛给用户，转为友好提示。
+    if (/is not a function|undefined is not|not defined|require is not/.test(message)) {
+      return "当前浏览器环境不兼容，请更新浏览器或使用 Chrome/Safari 后重试";
+    }
+    if (message.length > 80) return message.slice(0, 80) + "...";
     return message;
   };
 
@@ -424,7 +444,7 @@
     const submitResponse = await fetch(`${base}/prompt`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: filled, client_id: crypto.randomUUID() }),
+      body: JSON.stringify({ prompt: filled, client_id: randomUUIDCompat() }),
       signal,
     });
     if (!submitResponse.ok) {
