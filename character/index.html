@@ -12,7 +12,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdn.jsdelivr.net/npm/daisyui@4.7.2/dist/full.min.css" rel="stylesheet" type="text/css" />
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/localforage@1.10.0/dist/localforage.min.js"></script>
+    <script src="../assets/js/server-api.js"></script>
     <script src="../assets/js/card-utils.js"></script>
     <script src="../assets/js/ui-select.js"></script>
     <style>
@@ -2131,26 +2131,26 @@
                 };
 
 
-                // Storage Logic (IndexedDB via localforage)
+                // Storage Logic (Server KV API via server-api.js)
                 const characters = ref([createEmptyCharacter()]);
                 const isLoaded = ref(false);
-
-                // Initialize localforage
-                localforage.config({ name: 'AICharGen', storeName: 'characters' });
 
                 // Load Data
                 const loadData = async () => {
                     try {
-                        // Load from IndexedDB
-                        const saved = await localforage.getItem('ai_chargen_characters');
+                        // Load from server KV（键 ai_chargen_characters）
+                        const saved = await RPHubServerApi.kvGet('ai_chargen_characters');
                         if (saved) {
-                            const parsed = JSON.parse(saved);
-                            // Ensure every character has an ID for virtualization keys
-                            parsed.forEach(c => {
-                                if (!c.id) c.id = generateUUID();
-                                normalizeCharacterShape(c);
-                            });
-                            characters.value = parsed;
+                            // 兼容旧 JSON 字符串形态
+                            const parsed = typeof saved === 'string' ? JSON.parse(saved) : saved;
+                            if (Array.isArray(parsed)) {
+                                // Ensure every character has an ID for virtualization keys
+                                parsed.forEach(c => {
+                                    if (!c.id) c.id = generateUUID();
+                                    normalizeCharacterShape(c);
+                                });
+                                characters.value = parsed;
+                            }
                         }
 
                         // Restore active index
@@ -2175,12 +2175,11 @@
                 // Trigger load
                 loadData();
 
-                // Save to localforage whenever characters change (Debounced)
+                // Save to server KV whenever characters change (Debounced)
                 const debouncedSave = debounce(async (newVal) => {
                     try {
                         const start = performance.now();
-                        const json = JSON.stringify(newVal);
-                        await localforage.setItem('ai_chargen_characters', json);
+                        await RPHubServerApi.kvSet('ai_chargen_characters', newVal);
                         const end = performance.now();
                         if (end - start > 100) {
                             console.log(`%c[Performance] Data save took ${Math.round(end - start)}ms`, 'color: #f59e0b');
@@ -2462,7 +2461,7 @@
                     createNewCharacter();
                     currentCharacterIndex.value = 0;
                     // Force update storage
-                    await localforage.setItem('ai_chargen_characters', JSON.stringify(characters.value));
+                    await RPHubServerApi.kvSet('ai_chargen_characters', characters.value);
                     showToast('所有角色已清空', 'success');
                 };
 

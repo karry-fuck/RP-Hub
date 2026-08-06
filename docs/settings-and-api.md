@@ -148,7 +148,7 @@ Description: {user.description}
 | `imageGenSteps` / `imageGenCfg` / `imageGenDenoise`                                                                             | `40` / `6` / `1`                 | comfy `%steps%`/`%scale%`/`%denoise%`（sta1n 的 steps/scale 固定 40/6，不再读设置）                                    |
 | `imageGenNegativePrompt`                                                                                                        | ''                               | comfy `%negative_prompt%`；sta1n 留空用内置长负向串                                                                    |
 | `imageGenOpenaiBaseUrl` / `imageGenApiKey`                                                                                      | '' / ''                          | openai 生图专用地址/Key，留空回退对话 `apiUrl`/`apiKey`                                                                |
-| `comfyUrl`                                                                                                                      | `'http://127.0.0.1:8188'`        | ComfyUI 浏览器直连地址                                                                                                 |
+| `comfyUrl`                                                                                                                      | `'/comfy_api'`                   | ComfyUI 同源反代路径（server.py 转发到本机 8188；旧 `http://127.0.0.1:8188` 自动归一化，空值兜底）                   |
 | `comfyWorkflow`                                                                                                                 | `'default'`                      | 选中工作流 id：`default` / 本地自定义名 / `server:<名>`（服务端已保存）/ `import:<名>`（会话级导入，刷新回落 default） |
 | `comfyModel` / `comfySampler` / `comfyScheduler`                                                                                | '' / `'euler'` / `'normal'`      | ComfyUI 节点参数，空值由 `/object_info` 拉取后兜底                                                                     |
 | `comfyCustomResolution`                                                                                                         | `'832x1216'`                     | `imageGenResolution==='custom'` 时占位构建用的自定义分辨率字符串                                                       |
@@ -281,7 +281,7 @@ const getApiEndpoint = (path) =>
 
 ## 8. 生图服务
 
-生图服务支持三个后端（`settings.imageProvider`）：**sta1n**（默认，NAI 风格直链）、**OpenAI 兼容**（`/v1/images/generations`）、**ComfyUI**（本地浏览器直连）。核心代码在独立文件 `assets/js/image-gen.js`（挂 `window.RPHubImageGen`，IIFE 同构 card-utils.js），app.js 只留接线。
+生图服务支持三个后端（`settings.imageProvider`）：**sta1n**（默认，NAI 风格直链）、**OpenAI 兼容**（`/v1/images/generations`）、**ComfyUI**（同源反代 `/comfy_api`，经 server.py 转发到本机 ComfyUI 8188，手机免配置免 CORS）。核心代码在独立文件 `assets/js/image-gen.js`（挂 `window.RPHubImageGen`，IIFE 同构 card-utils.js），app.js 只留接线。对话内生成的图片会经 `POST /api/images` 持久化到服务器 `images/generated/`，刷新后命中已完成形态不再重新生成。
 
 ### 8.1 三个后端的生成函数（image-gen.js）
 

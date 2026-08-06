@@ -78,7 +78,7 @@
 
 ## 4. 存储与虚拟列表
 
-- **存储**：`localforage.config({ name:'AICharGen', storeName:'characters' })`（2139），key `ai_chargen_characters`（字符串化 JSON，非 localforage 对象）；`loadData`（2142）加载后补 `id` 并归一化；`watch` 深度监听 → `debouncedSave`（2179，800ms 防抖），`QuotaExceededError` 置 `storageQuotaExceeded` 提示。
+- **存储（服务器化后）**：经 `RPHubServerApi.kvGet/kvSet` 读写服务器 KV 键 `ai_chargen_characters`（字符串化 JSON 数组），不再用 localforage/IndexedDB（原 `AICharGen`）；`loadData`（2142）加载后补 `id` 并归一化；`watch` 深度监听 → `debouncedSave`（2179，800ms 防抖）自动写服务器，`storageQuotaExceeded` 提示保留（服务器写入失败时兜底）。
 - **虚拟列表**（1688-1714）：`itemHeight = 72`，按滚动位置算渲染窗口 `slice`（前后各 +2 缓冲），顶部/底部用 padding 撑高——角色多了也不卡。
 
 ---

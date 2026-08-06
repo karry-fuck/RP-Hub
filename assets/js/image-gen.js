@@ -10,7 +10,8 @@
 (function () {
   "use strict";
 
-  const DEFAULT_COMFY_BASE_URL = "http://127.0.0.1:8188";
+  // 同源反代：所有请求经 server.py 的 /comfy_api/* 转发到本机 ComfyUI，手机免配置免 CORS
+  const DEFAULT_COMFY_BASE_URL = "/comfy_api";
   const DEFAULT_STA1N_BASE_URL = "https://nai.sta1n.cn";
 
   // 透明 GIF 占位，加载前不闪烁
@@ -52,30 +53,50 @@
    *
    * @param {string} prompt   AI 输出的原始提示词（image###...### 的内容）
    * @param {number} offset   replace 回调的第 3 参，保证同文本同 taskid、同消息多图不同 id
-   * @param {object} ctx      读 settings 组装：{ provider, defaultTags, size, steps, cfg, denoise, negative }
+   * @param {object} ctx      读 settings 组装：{ provider, defaultTags, size, steps, cfg, denoise, negative,
+   *                           taskid, msgId, storedSrc }
+   *                          taskid/msgId 由 app.js 注入（图片持久化反查消息用）；
+   *                          storedSrc 存在时输出"已完成"形态（data-resolved="1" + 真实 <img>），
+   *                          scanPendingImageGen 会跳过，不再重新生成。
    * @returns {string}        占位 HTML 字符串（含 data-taskid/data-prompt 等）
    */
-  const buildPlaceholderHtml = (prompt, offset, ctx) => {
+  const buildTaskId = (prompt, offset) =>
+    `gen_${offset}_${hashString(prompt).toString(36)}`;
+
+  const buildPlaceholderHtml = (prompt, offset, ctx = {}) => {
     const provider = ctx.provider || "sta1n";
     const fullPrompt = [ctx.defaultTags, prompt].filter(Boolean).join(",");
     const seed = randomSeed();
-    const taskid = `gen_${offset}_${hashString(prompt).toString(36)}`;
+    const taskid = ctx.taskid || buildTaskId(prompt, offset);
+    const msgId = ctx.msgId || "";
+    const storedSrc = ctx.storedSrc || "";
 
     const attrs = [
-      'class="rphub-gen-wrap rphub-gen-pending"',
+      `class="rphub-gen-wrap ${storedSrc ? "rphub-gen-done" : "rphub-gen-pending"}"`,
       "data-rphub-gen",
       `data-taskid="${escapeHtmlAttr(taskid)}"`,
+      `data-msg-id="${escapeHtmlAttr(msgId)}"`,
       `data-provider="${escapeHtmlAttr(provider)}"`,
       `data-prompt="${escapeHtmlAttr(fullPrompt)}"`,
       `data-size="${escapeHtmlAttr(ctx.size || "")}"`,
       `data-seed="${seed}"`,
-    ].join(" ");
+    ];
+    if (storedSrc) attrs.push('data-resolved="1"');
+    const attrsStr = attrs.join(" ");
+
+    const imgHtml = `<img class="rphub-gen-img" src="${escapeHtmlAttr(storedSrc || TRANSPARENT_GIF)}" alt="${storedSrc ? "图片" : "生成中..."}" style="max-width:100%; height:auto; border-radius:9px; display:block;">`;
+    const statusHtml = storedSrc
+      ? ""
+      : `<span class="rphub-gen-status" style="font-size:12px; color:#64748b;">生成中...</span>`;
+    const retryHtml = storedSrc
+      ? ""
+      : `<button type="button" class="rphub-gen-retry" data-rphub-gen-retry style="display:none; font-size:12px; padding:2px 10px; border-radius:8px; border:1px solid #fca5a5; color:#dc2626; background:#fff; cursor:pointer;">重试</button>`;
 
     return (
-      `<div ${attrs} style="display:inline-flex; flex-direction:column; align-items:center; gap:4px; padding:6px; border:1px solid rgba(255,255,255,0.4); background:rgba(255,255,255,0.25); border-radius:12px; max-width:100%; box-sizing:border-box; vertical-align:middle;">` +
-      `<img class="rphub-gen-img" src="${TRANSPARENT_GIF}" alt="生成中..." style="max-width:100%; height:auto; border-radius:9px; display:block;">` +
-      `<span class="rphub-gen-status" style="font-size:12px; color:#64748b;">生成中...</span>` +
-      `<button type="button" class="rphub-gen-retry" data-rphub-gen-retry style="display:none; font-size:12px; padding:2px 10px; border-radius:8px; border:1px solid #fca5a5; color:#dc2626; background:#fff; cursor:pointer;">重试</button>` +
+      `<div ${attrsStr} style="display:inline-flex; flex-direction:column; align-items:center; gap:4px; padding:6px; border:1px solid rgba(255,255,255,0.4); background:rgba(255,255,255,0.25); border-radius:12px; max-width:100%; box-sizing:border-box; vertical-align:middle;">` +
+      imgHtml +
+      statusHtml +
+      retryHtml +
       `</div>`
     );
   };
@@ -1008,6 +1029,7 @@
     DEFAULT_STA1N_BASE_URL,
     DEFAULT_COMFY_WORKFLOW,
     TRANSPARENT_GIF,
+    buildTaskId,
     buildPlaceholderHtml,
     fillComfyWorkflow,
     parseResolution,

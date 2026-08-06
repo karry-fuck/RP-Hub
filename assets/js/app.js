@@ -332,10 +332,20 @@ createApp({
         el.scrollHeight - el.scrollTop - el.clientHeight < 10;
     };
     const latestUpdate = reactive({
-      id: 10162, // 确保这是一个五位数ID，每次更新内容时增加这个数字
+      id: 10163, // 确保这是一个五位数ID，每次更新内容时增加这个数字
       date: new Date().toISOString().split("T")[0],
       title: "网站公告",
       content: `
+### RP-Hub 1.9.0
+
+- 新增数据服务器 server.py（Python 标准库，零依赖）：数据落盘 SQLite，支持局域网跨设备共享
+- 聊天生成的图片自动持久化到服务器 images/generated/，刷新后不再重新生成
+- ComfyUI 改走服务器同源反代 /comfy_api，手机免配置免 CORS
+- 角色卡工坊数据改存服务器，跨设备同步
+- 切后台/关标签页自动兜底保存，不再依赖浏览器 IndexedDB
+
+> 注意：本次为服务器化版本，请用 \`python3 server.py\` 启动后访问，file:// 双击 index.html 将无法使用。
+
 ### RP-Hub 1.8.0
 
 - 新增 ComfyUI 工作流节点识别与选择（采样器/分辨率/Lora/正负提示词节点）
@@ -739,7 +749,7 @@ createApp({
       imageGenOpenaiBaseUrl: "",
       imageGenApiKey: "",
       imageGenBaseUrl: "",
-      comfyUrl: "http://127.0.0.1:8188",
+      comfyUrl: "/comfy_api",
       comfyWorkflow: "default",
       comfyModel: "",
       comfySampler: "euler",
@@ -2270,23 +2280,7 @@ image###描述###
       }
     });
 
-    // --- Persistence (IndexedDB) ---
-    const dbName = "RPHubDB";
-    const legacyDbName = String.fromCharCode(
-      83,
-      105,
-      108,
-      108,
-      121,
-      84,
-      97,
-      118,
-      101,
-      114,
-      110,
-      68,
-      66,
-    );
+    // --- Persistence (Server KV API，替代 IndexedDB) ---
     const storagePrefix = "rp_hub_";
     const legacyStoragePrefix = String.fromCharCode(
       115,
@@ -2316,39 +2310,19 @@ image###描述###
     const dbVersion = 1;
     let db = null;
     let legacyDb = null;
+    // 服务器强制模式：KV 内存缓存（loadData 时 kvList 一次拉全，其后读写均命中缓存）
+    const serverKvCache = new Map();
+    let _serverCacheWarmed = false;
 
     const openAppDB = (name) => {
-      return new Promise((resolve, reject) => {
-        const request = indexedDB.open(name, dbVersion);
-        request.onerror = (event) => reject("DB Error: " + event.target.error);
-        request.onsuccess = (event) => {
-          resolve(event.target.result);
-        };
-        request.onupgradeneeded = (event) => {
-          const db = event.target.result;
-          if (!db.objectStoreNames.contains("store")) {
-            db.createObjectStore("store");
-          }
-        };
-      });
+      // 服务器强制模式：不再打开 IndexedDB，数据统一走 server.py 的 /api/kv
+      return Promise.resolve(null);
     };
 
     const initDB = async () => {
-      db = await openAppDB(dbName);
-      try {
-        const dbList =
-          typeof indexedDB.databases === "function"
-            ? await indexedDB.databases()
-            : null;
-        const shouldOpenLegacy =
-          !dbList || dbList.some((item) => item && item.name === legacyDbName);
-        if (shouldOpenLegacy) {
-          legacyDb = await openAppDB(legacyDbName);
-        }
-      } catch (e) {
-        console.warn("Legacy DB check failed:", e);
-      }
-      return db;
+      // 服务器强制模式：无 IndexedDB 初始化；db/legacyDb 恒为 null，
+      // 下方所有 legacy 回退分支（dbGetWithLegacy 等）自动失效
+      return null;
     };
 
     const isDatabaseClosingError = (error) => {
@@ -2358,13 +2332,7 @@ image###描述###
       );
     };
 
-    const reopenMainDB = async () => {
-      try {
-        if (db) db.close();
-      } catch (_) {}
-      db = await openAppDB(dbName);
-      return db;
-    };
+    const reopenMainDB = async () => null;
 
     const unwrapForStorage = (value, seen = new WeakMap()) => {
       if (value === null || typeof value !== "object") return value;
@@ -2425,19 +2393,16 @@ image###描述###
     const getCurrentStoryBranchScopeId = () =>
       getStoryBranchScopeId(currentCharacter.value?.uuid);
 
-    const dbSetTo = (targetDb, key, value, options = {}) => {
-      return new Promise((resolve, reject) => {
-        if (!targetDb) return reject("DB not initialized");
-        const transaction = targetDb.transaction(["store"], "readwrite");
-        const store = transaction.objectStore("store");
-        // Clone to plain object to avoid Proxy issues unless the caller already did it.
-        const request = store.put(
-          options.clone === false ? value : cloneForStorage(value),
-          key,
+    const dbSetTo = async (targetDb, key, value, options = {}) => {
+      // 服务器强制模式：targetDb 恒为 null，统一写入 /api/kv + 更新内存缓存
+      const payload = options.clone === false ? value : cloneForStorage(value);
+      if (!window.RPHubServerApi) {
+        throw new Error(
+          "服务器 API 未加载（server-api.js 缺失或仍在使用 file:// 打开）",
         );
-        request.onsuccess = () => resolve();
-        request.onerror = (event) => reject(event.target.error);
-      });
+      }
+      await RPHubServerApi.kvSet(key, payload);
+      serverKvCache.set(key, payload);
     };
 
     const dbSet = async (key, value, options = {}) => {
@@ -2450,15 +2415,21 @@ image###描述###
       }
     };
 
-    const dbGetFrom = (targetDb, key) => {
-      return new Promise((resolve, reject) => {
-        if (!targetDb) return resolve(undefined);
-        const transaction = targetDb.transaction(["store"], "readonly");
-        const store = transaction.objectStore("store");
-        const request = store.get(key);
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = (event) => reject(event.target.error);
-      });
+    const dbGetFrom = async (targetDb, key) => {
+      // 服务器强制模式：缓存优先；未命中走网络，失败降级 undefined（沿用"无数据用默认值"）
+      if (serverKvCache.has(key)) return serverKvCache.get(key);
+      if (!window.RPHubServerApi) {
+        console.warn("服务器 API 未加载，key 读取降级为 undefined:", key);
+        return undefined;
+      }
+      try {
+        const value = await RPHubServerApi.kvGet(key);
+        if (value !== undefined) serverKvCache.set(key, value);
+        return value;
+      } catch (error) {
+        console.warn(`kvGet ${key} failed:`, error);
+        return undefined;
+      }
     };
 
     const dbGet = async (key) => {
@@ -2809,15 +2780,11 @@ image###描述###
       }
     };
 
-    const dbDeleteFrom = (targetDb, key) => {
-      return new Promise((resolve, reject) => {
-        if (!targetDb) return resolve();
-        const transaction = targetDb.transaction(["store"], "readwrite");
-        const store = transaction.objectStore("store");
-        const request = store.delete(key);
-        request.onsuccess = () => resolve();
-        request.onerror = (event) => reject(event.target.error);
-      });
+    const dbDeleteFrom = async (targetDb, key) => {
+      // 服务器强制模式：删 /api/kv + 清缓存（不存在也视为成功）
+      serverKvCache.delete(key);
+      if (!window.RPHubServerApi) return;
+      await RPHubServerApi.kvDelete(key);
     };
 
     const dbDelete = (key) => dbDeleteFrom(db, key);
@@ -2856,40 +2823,21 @@ image###描述###
       return `${value >= 10 ? value.toFixed(1) : value.toFixed(2)} ${unit}`;
     };
 
-    const readStorageKeys = (targetDb) =>
-      new Promise((resolve, reject) => {
-        if (!targetDb) return resolve([]);
-        const transaction = targetDb.transaction(["store"], "readonly");
-        const request = transaction.objectStore("store").getAllKeys();
-        request.onsuccess = () =>
-          resolve(request.result.map((key) => String(key)));
-        request.onerror = () => reject(request.error);
-      });
+    const readStorageKeys = async (targetDb) =>
+      Array.from(serverKvCache.keys());
 
-    const scanStorageEntries = (targetDb, source, inspect) =>
-      new Promise((resolve, reject) => {
-        if (!targetDb) return resolve();
-        const transaction = targetDb.transaction(["store"], "readonly");
-        const request = transaction.objectStore("store").openCursor();
-        request.onsuccess = () => {
-          const cursor = request.result;
-          if (!cursor) return resolve();
-          inspect(source, String(cursor.key), cursor.value);
-          cursor.continue();
-        };
-        request.onerror = () => reject(request.error);
-      });
+    const scanStorageEntries = async (targetDb, source, inspect) => {
+      // 服务器强制模式：仅 main 源扫描内存缓存一次；
+      // legacy 调用（source==="legacy"）恒为 no-op，避免重复计数
+      if (source !== "main") return;
+      serverKvCache.forEach((value, key) => inspect(source, key, value));
+    };
 
-    const deleteStorageKeys = (targetDb, keys) =>
-      new Promise((resolve, reject) => {
-        if (!targetDb || keys.length === 0) return resolve();
-        const transaction = targetDb.transaction(["store"], "readwrite");
-        const store = transaction.objectStore("store");
-        keys.forEach((key) => store.delete(key));
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-        transaction.onabort = () => reject(transaction.error);
-      });
+    const deleteStorageKeys = async (targetDb, keys) => {
+      if (!keys || keys.length === 0) return;
+      await Promise.all(keys.map((key) => RPHubServerApi.kvDelete(key)));
+      keys.forEach((key) => serverKvCache.delete(key));
+    };
 
     const getStorageLogicalKey = (key) => {
       const value = String(key || "");
@@ -2953,11 +2901,9 @@ image###描述###
       storageStats.error = "";
       try {
         if (!db) await initDB();
-        const [mainKeys, legacyKeys, estimate] = await Promise.all([
+        const [mainKeys, legacyKeys] = await Promise.all([
           readStorageKeys(db),
           readStorageKeys(legacyDb),
-          navigator.storage?.estimate?.().catch(() => ({})) ||
-            Promise.resolve({}),
         ]);
         const mainLogicalKeys = new Set(mainKeys.map(getStorageLogicalKey));
         const scopedLogicalKeys = new Set(
@@ -3049,11 +2995,11 @@ image###描述###
           (total, bytes) => total + bytes,
           0,
         );
-        const measuredUsage = Number(estimate.usage) || accountedBytes;
-        const sizeScale =
-          accountedBytes > 0 ? measuredUsage / accountedBytes : 1;
+        // 服务器模式：usage 由扫描求和，quota 置空（前端 UI 对 quota falsy 显示"未知"）
+        const measuredUsage = accountedBytes;
+        const sizeScale = 1;
         storageStats.usage = measuredUsage;
-        storageStats.quota = Number(estimate.quota) || 0;
+        storageStats.quota = 0;
         storageStats.orphanedBytes =
           (orphanedEntryBytes + embeddedOrphanBytes) * sizeScale;
         storageStats.orphanedItems =
@@ -3165,6 +3111,19 @@ image###描述###
       try {
         await initDB();
 
+        // 服务器强制模式：一次性 kvList 预热缓存，其后所有 getStoredValue/scoped 键命中缓存
+        if (!_serverCacheWarmed && window.RPHubServerApi) {
+          try {
+            const list = await RPHubServerApi.kvList();
+            (list.keys || []).forEach(({ key, value }) => {
+              serverKvCache.set(key, value);
+            });
+            _serverCacheWarmed = true;
+          } catch (e) {
+            console.warn("KV 缓存预热失败:", e);
+          }
+        }
+
         // Load from DB
         const savedChars = await getStoredValue("characters");
         if (savedChars) {
@@ -3239,6 +3198,10 @@ image###描述###
         } else {
           normalizeApiProviderSettings();
         }
+        // ComfyUI 同源反代：空值 / 旧默认直连地址统一归一化为 /comfy_api
+        const rawComfyUrl = String(settings.comfyUrl || "").trim();
+        if (!rawComfyUrl || rawComfyUrl === "http://127.0.0.1:8188")
+          settings.comfyUrl = "/comfy_api";
         if (
           (!savedSettings ||
             Number(savedSettings.fontFamilyVersion || 0) < 4) &&
@@ -3818,6 +3781,70 @@ image###描述###
     };
 
     // ===== 生图服务多 provider：占位 + 异步填图 =====
+
+    // ---- 聊天图片持久化（服务器落盘 + 写回消息对象，刷新后不再重新生成）----
+    // 同一源 URL 只上传一次，避免同提示词多消息重复抓取
+    const _persistedSrcMap = new Map();
+
+    /**
+     * 把生图结果持久化到服务器，返回可长期访问的 /images/generated/<uuid>.png 地址。
+     * 已是 /images/ 地址直接返回；data: 前缀走 base64 上传；http(s)//comfy_api 走服务器抓取。
+     * @param {string} src 生图原始地址
+     * @returns {Promise<string>} 持久化地址（失败时原样返回 src）
+     */
+    const persistChatImage = async (src) => {
+      if (!window.RPHubServerApi || !src) return src;
+      const s = String(src);
+      if (s.startsWith("/images/")) return s;
+      if (_persistedSrcMap.has(s)) return _persistedSrcMap.get(s);
+      let url = s;
+      try {
+        if (s.startsWith("data:")) {
+          url = (await RPHubServerApi.imageSave({ data: s, category: "generated" })).url;
+        } else if (
+          s.startsWith("/comfy_api/") ||
+          s.startsWith("http://") ||
+          s.startsWith("https://")
+        ) {
+          url = (await RPHubServerApi.imageSave({ url: s, category: "generated" })).url;
+        }
+        if (url && url !== s) _persistedSrcMap.set(s, url);
+      } catch (e) {
+        console.warn("聊天图片持久化失败:", e);
+      }
+      return url;
+    };
+
+    /**
+     * 按 DOM 节点上的 [data-taskid] + 最近 [data-chat-index] 反查消息，
+     * 写入 msg.images[taskid]=url，有变化才落库（saveChatHistoryNow 自带防抖/排队/重试）。
+     * 说明：消息对象本身没有 id 字段，消息容器上的 data-chat-index（chatHistory 索引）
+     * 是稳定定位方式。
+     * @param {string} taskid
+     * @param {string} url
+     */
+    const writeBackMessageImages = (taskid, url) => {
+      if (!chatContainer.value || !chatHistory.value) return;
+      const nodes = chatContainer.value.querySelectorAll(
+        `[data-rphub-gen][data-taskid="${taskid}"]`,
+      );
+      let changed = false;
+      nodes.forEach((node) => {
+        const host = node.closest("[data-chat-index]");
+        if (!host) return;
+        const chatIndex = Number(host.dataset.chatIndex);
+        if (!Number.isFinite(chatIndex)) return;
+        const msg = chatHistory.value[chatIndex];
+        if (!msg) return;
+        if (!msg.images) msg.images = {};
+        if (msg.images[taskid] !== url) {
+          msg.images[taskid] = url;
+          changed = true;
+        }
+      });
+      if (changed) saveChatHistoryNow();
+    };
+
     const imageGenQueue = window.RPHubImageGen.createImageGenQueue({
       concurrency: 3,
       timeoutMs: 120000,
@@ -3855,7 +3882,14 @@ image###描述###
           cardUtils,
         );
       },
-      onResolve: (taskid, src) => {
+      onResolve: async (taskid, src) => {
+        // 持久化到服务器并写回消息对象（不阻塞 DOM 填图）
+        try {
+          const url = await persistChatImage(src);
+          if (url) writeBackMessageImages(taskid, url);
+        } catch (e) {
+          console.warn("聊天图片写回消息失败:", e);
+        }
         applyImageGenResultToAll(taskid, src, null);
       },
       onReject: (taskid, errMsg) => {
@@ -3864,7 +3898,8 @@ image###描述###
     });
 
     // 纯函数：读 settings 组装 ctx，产出占位 HTML（无副作用）
-    const buildImageGenPlaceholder = (prompt, offset) => {
+    // msgCtx: { msgId, images }——图片持久化反查消息与命中已存图片
+    const buildImageGenPlaceholder = (prompt, offset, msgCtx = null) => {
       const provider = settings.imageProvider || "sta1n";
       const resolution = settings.imageGenResolution;
       const size =
@@ -3873,10 +3908,16 @@ image###描述###
           : provider === "comfy" && resolution === "custom"
             ? settings.comfyCustomResolution || "1024x1024"
             : normalizeImageGenResolution(resolution, provider);
+      const taskid = window.RPHubImageGen.buildTaskId(prompt, offset);
+      const msgId = msgCtx?.msgId || "";
+      const storedSrc = msgCtx?.images?.[taskid] || "";
       return window.RPHubImageGen.buildPlaceholderHtml(prompt, offset, {
         provider,
         defaultTags: settings.imageGenDefaultTags || "",
         size,
+        taskid: msgId ? taskid : undefined,
+        msgId,
+        storedSrc,
       });
     };
 
@@ -5952,12 +5993,14 @@ ${content}
     };
     const processRegex = (text, options = {}) => {
       if (!text) return "";
-      // options: { isDisplay, isPrompt, role, depth }
+      // options: { isDisplay, isPrompt, role, depth, msgId, images }
       const {
         isDisplay = false,
         isPrompt = false,
         role = null,
         depth = 0,
+        msgId = null,
+        images = null,
       } = options;
       if (role === "system") return text;
 
@@ -6043,7 +6086,10 @@ ${content}
             result = cardUtils.transformUnprotectedText(result, (part) =>
               part.replace(re, (match, p1, offset) => {
                 try {
-                  return buildImageGenPlaceholder(p1 || "", offset);
+                  return buildImageGenPlaceholder(p1 || "", offset, {
+                    msgId,
+                    images,
+                  });
                 } catch (e) {
                   console.error("buildImageGenPlaceholder error:", e);
                   return match;
@@ -6301,9 +6347,21 @@ ${content}
       collapseNativeReasoning(chatHistory.value[chatHistory.value.length - 1]);
     };
 
-    const renderMarkdown = (text, role = "assistant", skipRegex = false) => {
+    const renderMarkdown = (
+      text,
+      role = "assistant",
+      skipRegex = false,
+      msg = null,
+    ) => {
       if (!text) return "";
-      const cacheKey = `${role}_${skipRegex}_${text}`;
+      // cache key 带 msg.id 与图片持久化状态指纹：图片落库后重渲染须命中已完成形态，
+      // 否则会退回 pending 占位导致重新生成
+      const imgFp = msg?.images
+        ? Object.keys(msg.images)
+            .map((k) => `${k}=${msg.images[k]}`)
+            .join("&")
+        : "";
+      const cacheKey = `${role}_${skipRegex}_${msg?.id || ""}_${imgFp}_${text}`;
       if (renderMarkdownCache.has(cacheKey))
         return renderMarkdownCache.get(cacheKey);
 
@@ -6312,7 +6370,12 @@ ${content}
       // Apply regex for display (real-time)
       processed = skipRegex
         ? processed
-        : processRegex(processed, { isDisplay: true, role: role });
+        : processRegex(processed, {
+            isDisplay: true,
+            role: role,
+            msgId: msg?.id || null,
+            images: msg?.images || null,
+          });
       const createIframe = (rawHtml) =>
         createExecutableHtmlIframe(
           rawHtml,
@@ -12596,6 +12659,8 @@ ${content}
         characters.value.push(normalizedCharacterData);
       }
       showCharacterEditor.value = false;
+      // 直接落库（保存角色卡工坊编辑后的角色）
+      saveData();
       showToast("角色已保存", "success");
     };
 
@@ -15572,6 +15637,24 @@ ${uiTemplateAnalysisSection}
         ) {
           showApiProviderSelector.value = false;
         }
+      });
+
+      // --- 兜底落库：切后台 / 关标签页前保存（手机切 App 是主要触发时机）---
+      let _exitSaveInFlight = false;
+      const flushExitSave = () => {
+        if (_exitSaveInFlight) return;
+        _exitSaveInFlight = true;
+        Promise.resolve()
+          .then(() => flushPendingChatHistorySave())
+          .then(() => saveData())
+          .catch((e) => console.warn("退出兜底保存失败:", e))
+          .finally(() => {
+            _exitSaveInFlight = false;
+          });
+      };
+      document.addEventListener("pagehide", flushExitSave);
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") flushExitSave();
       });
     });
 

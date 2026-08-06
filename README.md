@@ -5,7 +5,7 @@
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-38B2AC?logo=tailwind-css&logoColor=white)](https://tailwindcss.com/)
 [![DaisyUI](https://img.shields.io/badge/DaisyUI-5A0EF8?logo=daisyui&logoColor=white)](https://daisyui.com/)
 
-> **一款纯前端运行的本地角色扮演（Roleplay）对话和角色卡生成工具。**
+> **一款本地角色扮演（Roleplay）对话和角色卡生成工具。数据经轻量服务器（`server.py`）落盘 SQLite，支持局域网跨设备共享、聊天图片持久化与 ComfyUI 同源反代。**
 
 **【免责与授权声明】**  
 本项目基于 **[CC BY-NC 4.0（知识共享-署名-非商业性使用 4.0 国际许可协议）](./LICENSE)** 开源。**明确禁止任何形式的商业化使用（包括但不限于：作为收费服务提供、打包在付费产品中售卖、在产品内植入广告盈利等）。** 任何使用者必须遵守该协议，尊重原作者的署名权。对于违反协议的商业行为，保留追究法律责任的权利。
@@ -18,14 +18,22 @@ Roleplay Hub 致力于提供流畅、私密且功能强大的本地化AI Rolepla
 
 ## 快速开始 (Quick Start)
 
-本项目无需复杂的 Node.js 环境或依赖安装，即开即用！
+本项目只需 **Python 3**（标准库，零第三方依赖），无需 Node.js / 构建步骤。
 
 ### 1. 下载与运行
 1. 点击项目主页绿色的 `Code` 按钮，选择 `Download ZIP`。
 2. 将下载的 ZIP 压缩包解压到您的本地任意文件夹中。
-3. 双击打开 `index.html` 文件，即可在浏览器（推荐 Chrome / Edge / Firefox）中启动 Roleplay Hub。
+3. 在项目根目录启动服务器：
+   ```bash
+   python3 server.py
+   ```
+4. 浏览器访问 **http://127.0.0.1:8000**（默认端口 8000）即可开始使用。
 
-*(注：如果您遇到跨域或本地文件读取权限问题，可以尝试使用 VS Code 的 `Live Server` 插件，或简单的本地服务器工具来运行该目录。但在绝大多数现代浏览器中，双击 index.html 即可正常使用所有核心功能。)*
+- **局域网跨设备**：手机 / 其他电脑访问 `http://<本机IP>:8000`（启动时服务器会打印本机 IP；若无法访问请先放行端口）。
+- 常用参数：`python3 server.py --port 9000 --bind 0.0.0.0`。
+- **数据落盘**：角色、聊天、记忆、设置存到 `rp_hub_data.db`（SQLite），聊天生成的图片存 `images/generated/`，重启不丢失、跨设备共享。
+- **ComfyUI 免配置**：同机启动 ComfyUI 后，应用内选 ComfyUI 生图即可（走 `/comfy_api` 反代，无需填地址、免 CORS）。
+- ⚠️ **必须通过 server.py 访问**：`file://` 双击 `index.html` 无法使用（数据与图片全部经服务器读写）。
 
 ### 2. 初始化设置
 1. 打开应用后，点击侧边栏（或顶部菜单）的**设置 (Settings)** 选项。
@@ -40,6 +48,7 @@ Roleplay Hub 致力于提供流畅、私密且功能强大的本地化AI Rolepla
 
 ```text
 Roleplay-Hub/
+├── server.py             # 数据服务器（Python 标准库，零依赖）
 ├── index.html            # 主程序
 ├── character/            # 辅助页面
 │   └── index.html
@@ -48,9 +57,13 @@ Roleplay-Hub/
 │   │   └── styles.css    # 核心样式文件
 │   └── js/
 │       ├── app.js        # 核心业务逻辑
+│       ├── server-api.js # 服务器 API 客户端（kvGet/kvSet/imageSave 等）
 │       ├── card-utils.js # 角色卡导入导出相关工具
 │       ├── ui-select.js  # 自定义选择器组件
 │       └── utils.js      # 工具函数库
+├── images/
+│   └── generated/        # 聊天生成的图片（自动创建）
+├── rp_hub_data.db        # 数据存储（SQLite，首次启动自动生成）
 └── README.md             # 本说明文件
 ```
 
