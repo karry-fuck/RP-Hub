@@ -385,7 +385,12 @@
       height: resolution.height,
     };
 
-    const filled = fillComfyWorkflow(workflow, vars);
+    // 注入占位符（选择目标采样器/分辨率节点，不污染工作流缓存）后再填充实际值
+    const injected = injectComfyPlaceholders(workflow, {
+      samplerNodeId: settings.comfySamplerNodeId || "auto",
+      latentNodeId: settings.comfyResolutionNodeId || "auto",
+    });
+    const filled = fillComfyWorkflow(injected, vars);
 
     // 1. 提交 prompt
     const submitResponse = await fetch(`${base}/prompt`, {
@@ -479,6 +484,23 @@
     return { models, samplers, schedulers };
   };
 
+  /**
+   * 拉取完整 /object_info JSON（LiteGraph 工作流导入时 graphToPrompt 需要）
+   *
+   * @param {string} comfyUrl
+   * @returns {Promise<object>} 原始 /object_info 响应体
+   */
+  const fetchComfyObjectInfoRaw = async (comfyUrl) => {
+    const url = String(comfyUrl || "")
+      .trim()
+      .replace(/\/+$/, "");
+    if (!url) throw new Error("请先填写 ComfyUI 地址");
+    const response = await fetch(`${url}/object_info`);
+    if (!response.ok)
+      throw new Error(`无法连接 ComfyUI: HTTP ${response.status}`);
+    return response.json();
+  };
+
   // ---- 服务端 workflow：LiteGraph 图格式 → ComfyUI API 格式 ----
 
   /**
@@ -502,6 +524,14 @@
     const head = type[0];
     return Array.isArray(head) || WIDGET_PRIMITIVES.has(head);
   };
+  // 旧式工作流中 control_after_generate 曾作为独立 widget 紧跟 seed，
+  // 现代 object_info 已并入 seed 选项，转换时需识别并跳过其占位值
+  const CONTROL_AFTER_GENERATE_VALUES = new Set([
+    "randomize",
+    "fixed",
+    "increment",
+    "decrement",
+  ]);
 
   /**
    * LiteGraph 图格式 → ComfyUI API prompt 格式
@@ -564,11 +594,24 @@
 
       const inputs = {};
       const wv = node.widgets_values || [];
-      // widget 值按 object_info 顺序映射（已连接的输入不覆盖）
-      widgetNames.forEach((name, idx) => {
-        if (idx < wv.length && !(nodeInputs[name] && nodeInputs[name].link)) {
-          inputs[name] = wv[idx];
+      // widget 值按 object_info 顺序映射（已连接的输入不覆盖）。
+      // 兼容旧式工作流：seed 后的 control_after_generate 占位值需跳过，
+      // 否则 widgets_values 多出的元素会使后续参数整体错位
+      let wvIdx = 0;
+      let prevWasSeed = false;
+      widgetNames.forEach((name) => {
+        if (
+          prevWasSeed &&
+          wvIdx < wv.length &&
+          CONTROL_AFTER_GENERATE_VALUES.has(wv[wvIdx])
+        ) {
+          wvIdx++;
         }
+        prevWasSeed = name === "seed";
+        if (wvIdx < wv.length && !(nodeInputs[name] && nodeInputs[name].link)) {
+          inputs[name] = wv[wvIdx];
+        }
+        wvIdx++;
       });
       // 链接输入
       for (const i of node.inputs || []) {
@@ -582,7 +625,8 @@
           const val = (origin.widgets_values || [])[0];
           if (val !== undefined) inputs[i.name] = val;
         } else {
-          inputs[i.name] = [originId, originSlot];
+          // 引用 id 统一字符串化：ComfyUI 校验用 prompt[o_id] 索引（键为字符串），数字会 KeyError
+          inputs[i.name] = [String(originId), originSlot];
         }
       }
       out[node.id] = { class_type: node.type, inputs };
@@ -604,66 +648,150 @@
     "SamplerCustom",
     "SamplerCustomAdvanced",
   ]);
+  const EMPTY_LATENT_TYPES = new Set([
+    "EmptyLatentImage",
+    "EmptySD3LatentImage",
+    "EmptyHDLatentImage",
+  ]);
+  // 可注入正/负提示词的文本编码节点
+  const CLIP_TEXT_ENCODE_TYPES = new Set([
+    "CLIPTextEncode",
+    "CLIPTextEncodeSDXL",
+    "CLIPTextEncodeFlux",
+    "CLIPTextEncodeAuraFlow",
+  ]);
 
   /**
-   * 在 API prompt 中注入动态占位符，使服务端 workflow 复用本应用参数
+   * 在 API prompt 中注入动态占位符，使工作流复用本应用参数
    *  - CheckpointLoaderSimple.ckpt_name → %model%
-   *  - Empty*LatentImage 宽高 → %width%/%height%
-   *  - KSampler* 采样参数 → %seed%/%steps%/%scale%/%sampler%/%scheduler%/%denoise%
-   *  - CLIPTextEncode.text 按采样器正/负引用关系 → %prompt%/%negative_prompt%
+   *  - 目标 Empty*LatentImage 宽高 → %width%/%height%
+   *  - 目标 KSampler* 采样参数 → %seed%/%steps%/%scale%/%sampler%/%scheduler%/%denoise%
+   *  - 正/负 CLIPTextEncode.text → %prompt%/%negative_prompt%（始终注入，按参考采样器推导）
    *
-   * @param {object} apiPrompt graphToPrompt 产物
-   * @returns {object} 注入后的 apiPrompt（原地修改）
+   * 节点选择三态（samplerNodeId / latentNodeId）：
+   *  - "auto" / 缺省 → 取工作流中第一个该类节点
+   *  - 具体 id       → 字符串精确匹配
+   *  - "none"        → 不注入该类参数（正/负提示词除外，仍按第一个采样器推导，避免空图）
+   *
+   * @param {object} apiPrompt  { nodeId: { class_type, inputs } }
+   * @param {object} [opts]
+   * @param {string} [opts.samplerNodeId="auto"]
+   * @param {string} [opts.latentNodeId="auto"]
+   * @returns {object} 注入后的新对象（不修改入参）
    */
-  const injectComfyPlaceholders = (apiPrompt) => {
-    const encodeNodes = [];
+  const injectComfyPlaceholders = (apiPrompt, opts = {}) => {
+    // 克隆后修改，避免污染 DEFAULT_COMFY_WORKFLOW 常量与 comfyServerWorkflows 缓存
+    const target = JSON.parse(JSON.stringify(apiPrompt || {}));
+    const samplerNodeId = opts.samplerNodeId || "auto";
+    const latentNodeId = opts.latentNodeId || "auto";
+
     const samplers = [];
-    for (const p of Object.values(apiPrompt)) {
+    const latents = [];
+    const encodes = [];
+    for (const [id, p] of Object.entries(target)) {
       const cls = p && p.class_type;
       const inp = p && p.inputs;
       if (!cls || !inp) continue;
       if (cls === "CheckpointLoaderSimple") {
         if ("ckpt_name" in inp) inp.ckpt_name = "%model%";
-      } else if (
-        cls === "EmptyLatentImage" ||
-        cls === "EmptySD3LatentImage" ||
-        cls === "EmptyHDLatentImage"
-      ) {
-        if ("width" in inp) inp.width = "%width%";
-        if ("height" in inp) inp.height = "%height%";
+      } else if (EMPTY_LATENT_TYPES.has(cls)) {
+        latents.push(id);
       } else if (K_SAMPLER_TYPES.has(cls)) {
-        samplers.push(p);
-        if ("seed" in inp) inp.seed = "%seed%";
-        if ("steps" in inp) inp.steps = "%steps%";
-        if ("cfg" in inp) inp.cfg = "%scale%";
-        if ("sampler_name" in inp) inp.sampler_name = "%sampler%";
-        if ("scheduler" in inp) inp.scheduler = "%scheduler%";
-        if ("denoise" in inp) inp.denoise = "%denoise%";
-      } else if (
-        cls === "CLIPTextEncode" ||
-        cls === "CLIPTextEncodeSDXL" ||
-        cls === "CLIPTextEncodeFlux" ||
-        cls === "CLIPTextEncodeAuraFlow"
-      ) {
-        encodeNodes.push(p);
+        samplers.push(id);
+      } else if (CLIP_TEXT_ENCODE_TYPES.has(cls)) {
+        encodes.push(id);
       }
     }
-    // 正负提示词按采样器引用判定（KSampler.positive / .negative 指向的 CLIPTextEncode）
+
+    // 目标采样器：auto=第一个；none=无；否则精确匹配
+    let targetSampler = null;
+    if (samplerNodeId === "none") targetSampler = null;
+    else if (samplerNodeId === "auto" || samplerNodeId === "")
+      targetSampler = samplers[0] || null;
+    else
+      targetSampler = samplers.includes(String(samplerNodeId))
+        ? String(samplerNodeId)
+        : null;
+
+    if (targetSampler) {
+      const inp = target[targetSampler].inputs;
+      const samplerFields = [
+        ["seed", "%seed%"],
+        ["steps", "%steps%"],
+        ["cfg", "%scale%"],
+        ["sampler_name", "%sampler%"],
+        ["scheduler", "%scheduler%"],
+        ["denoise", "%denoise%"],
+      ];
+      for (const [k, ph] of samplerFields) if (k in inp) inp[k] = ph;
+    }
+
+    // 正/负提示词：始终注入。参考采样器 = 指定节点，否则第一个采样器（none 也注入，保证对话提示词生效）
+    const refSampler = targetSampler || samplers[0] || null;
     const posRefs = new Set();
     const negRefs = new Set();
-    for (const s of samplers) {
-      const pos = s.inputs && s.inputs.positive;
-      const neg = s.inputs && s.inputs.negative;
-      if (Array.isArray(pos)) posRefs.add(String(pos[0]));
-      if (Array.isArray(neg)) negRefs.add(String(neg[0]));
+    if (refSampler) {
+      const inp = target[refSampler].inputs || {};
+      if (Array.isArray(inp.positive)) posRefs.add(String(inp.positive[0]));
+      if (Array.isArray(inp.negative)) negRefs.add(String(inp.negative[0]));
     }
-    for (const [id, p] of Object.entries(apiPrompt)) {
-      if (!encodeNodes.includes(p)) continue;
+    for (const id of encodes) {
+      const p = target[id];
       if (!("text" in p.inputs)) continue;
       if (posRefs.has(id)) p.inputs.text = "%prompt%";
       else if (negRefs.has(id)) p.inputs.text = "%negative_prompt%";
     }
-    return apiPrompt;
+
+    // 目标分辨率节点
+    let targetLatent = null;
+    if (latentNodeId === "none") targetLatent = null;
+    else if (latentNodeId === "auto" || latentNodeId === "")
+      targetLatent = latents[0] || null;
+    else
+      targetLatent = latents.includes(String(latentNodeId))
+        ? String(latentNodeId)
+        : null;
+    if (targetLatent) {
+      const inp = target[targetLatent].inputs;
+      if ("width" in inp) inp.width = "%width%";
+      if ("height" in inp) inp.height = "%height%";
+    }
+
+    return target;
+  };
+
+  /**
+   * 识别工作流中的关键节点：采样器、分辨率（Empty*LatentImage）节点
+   * 采样器附带其 positive/negative 引用的节点 id（用于正/负提示词跟随所选采样器）
+   *
+   * @param {object} apiPrompt  { nodeId: { class_type, inputs } }
+   * @returns {{samplers: Array<{id:string,classType:string,positiveId:string|null,negativeId:string|null}>, latents: Array<{id:string,classType:string}>}}
+   */
+  const detectComfyNodes = (apiPrompt) => {
+    const samplers = [];
+    const latents = [];
+    for (const [id, p] of Object.entries(apiPrompt || {})) {
+      const cls = p && p.class_type;
+      const inp = p && p.inputs;
+      if (!cls || !inp) continue;
+      if (K_SAMPLER_TYPES.has(cls)) {
+        const pos = Array.isArray(inp.positive)
+          ? String(inp.positive[0])
+          : null;
+        const neg = Array.isArray(inp.negative)
+          ? String(inp.negative[0])
+          : null;
+        samplers.push({
+          id: String(id),
+          classType: cls,
+          positiveId: pos,
+          negativeId: neg,
+        });
+      } else if (EMPTY_LATENT_TYPES.has(cls)) {
+        latents.push({ id: String(id), classType: cls });
+      }
+    }
+    return { samplers, latents };
   };
 
   /**
@@ -720,7 +848,8 @@
         const data = await fileRes.json();
         // 用内部拉取的完整 object_info（外部可能未传 objectInfo，传空则节点全被跳过）
         const api = graphToPrompt(data, info);
-        injectComfyPlaceholders(api);
+        // 注：不在转换时注入占位符——注入移交给 generateImageWithComfy / loadComfyWorkflowDraft，
+        //     保持缓存为工作流原值，切换"无（不控制）"时才能回落原值
         const name = String(f).replace(/\.json$/i, "");
         result[name] = api;
       } catch (e) {
@@ -836,9 +965,11 @@
     parseResolution,
     normalizeOpenAISize,
     fetchComfyObjectInfo,
+    fetchComfyObjectInfoRaw,
     fetchComfyServerWorkflows,
     graphToPrompt,
     injectComfyPlaceholders,
+    detectComfyNodes,
     normalizeImageGenError,
     createImageGenQueue,
     generateImageWithSta1n,

@@ -744,6 +744,8 @@ createApp({
       comfySampler: "euler",
       comfyScheduler: "normal",
       comfyCustomResolution: "832x1216",
+      comfySamplerNodeId: "auto",
+      comfyResolutionNodeId: "auto",
       qualityModel: DEFAULT_API_CONFIG.qualityModel,
       balancedModel: DEFAULT_API_CONFIG.balancedModel,
       fastModel: DEFAULT_API_CONFIG.fastModel,
@@ -3247,6 +3249,10 @@ image###描述###
         settings.stream = true;
         normalizeActiveToolAggressivenessSettings();
 
+        // 导入的工作流为会话级状态、不持久化：刷新后若残留下拉选中 import:xxx，归一化回落默认
+        if (String(settings.comfyWorkflow).startsWith("import:"))
+          settings.comfyWorkflow = "default";
+
         const savedPresets = await getStoredValue("presets");
         if (savedPresets) presets.value = savedPresets.map(normalizePreset);
 
@@ -3517,6 +3523,8 @@ image###描述###
     const comfyObjectInfo = ref({ models: [], samplers: [], schedulers: [] });
     // 服务端已保存工作流（运行时从 {comfyUrl}/api/userdata?dir=workflows 拉取，不持久化）
     const comfyServerWorkflows = ref({});
+    // 导入的工作流（会话级，刷新即失）：{ name, workflow }
+    const comfyImportedWorkflow = ref(null);
 
     const loadComfyWorkflows = () => {
       try {
@@ -3583,6 +3591,14 @@ image###描述###
           value: `server:${k}`,
           label: `服务端：${k}`,
         })),
+        ...(comfyImportedWorkflow.value
+          ? [
+              {
+                value: `import:${comfyImportedWorkflow.value.name}`,
+                label: `导入：${comfyImportedWorkflow.value.name}`,
+              },
+            ]
+          : []),
       ];
     });
 
@@ -3603,20 +3619,89 @@ image###描述###
     );
 
     const comfyWorkflowDraft = ref("");
+
+    // ---- 关键节点识别（基于草稿实时解析，语法错误时回落上次有效值） ----
+    let lastValidComfyDraft = null;
+    const parsedComfyDraft = computed(() => {
+      const raw = comfyWorkflowDraft.value;
+      if (!raw) return lastValidComfyDraft || {};
+      try {
+        lastValidComfyDraft = JSON.parse(raw);
+        return lastValidComfyDraft;
+      } catch (e) {
+        return lastValidComfyDraft || {};
+      }
+    });
+    const detectedComfyNodes = computed(() => {
+      const draft = parsedComfyDraft.value;
+      if (!draft || typeof draft !== "object")
+        return { samplers: [], latents: [] };
+      return window.RPHubImageGen.detectComfyNodes(draft);
+    });
+    const comfySamplerNodeOptions = computed(() => {
+      const { samplers } = detectedComfyNodes.value;
+      return [
+        { value: "auto", label: "自动（第一个采样器）" },
+        ...samplers.map((s) => ({
+          value: s.id,
+          label: `节点 ${s.id}（${s.classType}）`,
+        })),
+        { value: "none", label: "无（不控制采样参数）" },
+      ];
+    });
+    const comfyResolutionNodeOptions = computed(() => {
+      const { latents } = detectedComfyNodes.value;
+      return [
+        { value: "auto", label: "自动（第一个分辨率节点）" },
+        ...latents.map((l) => ({
+          value: l.id,
+          label: `节点 ${l.id}（${l.classType}）`,
+        })),
+        { value: "none", label: "无（不控制分辨率）" },
+      ];
+    });
+    // 正/负提示词跟随所选采样器；"无"时仍按第一个采样器推导（提示词始终注入）
+    const comfyActiveSamplerPosNeg = computed(() => {
+      const { samplers } = detectedComfyNodes.value;
+      if (!samplers.length) return "";
+      const sel = settings.comfySamplerNodeId || "auto";
+      let target;
+      if (sel === "none") target = samplers[0];
+      else if (sel === "auto" || sel === "") target = samplers[0];
+      else target = samplers.find((s) => s.id === String(sel)) || samplers[0];
+      return `正=${target.positiveId || "-"} 负=${target.negativeId || "-"}`;
+    });
+
     const loadComfyWorkflowDraft = () => {
       const sel = settings.comfyWorkflow;
       let wf = null;
       if (sel && sel.startsWith("server:")) {
-        // 服务端工作流：显示转换后的 API JSON（含占位符），可编辑后另存为自定义
+        // 服务端工作流：显示转换后的 API JSON，可编辑后另存为自定义
         const server = comfyServerWorkflows.value || {};
         wf = server[sel.slice("server:".length)];
+      } else if (sel && sel.startsWith("import:")) {
+        // 导入工作流：会话级，直接展示（未持久化）
+        wf = comfyImportedWorkflow.value
+          ? comfyImportedWorkflow.value.workflow
+          : null;
       } else {
         const map = loadComfyWorkflows();
         wf = map && map[sel];
       }
-      comfyWorkflowDraft.value = wf
-        ? JSON.stringify(wf, null, 2)
-        : JSON.stringify(window.RPHubImageGen.DEFAULT_COMFY_WORKFLOW, null, 2);
+      if (!wf) {
+        comfyWorkflowDraft.value = JSON.stringify(
+          window.RPHubImageGen.DEFAULT_COMFY_WORKFLOW,
+          null,
+          2,
+        );
+        return;
+      }
+      // 按当前节点选择注入占位符，使预览显示 %steps% 等（克隆注入，不污染 wf 缓存）
+      const injected = window.RPHubImageGen.injectComfyPlaceholders(wf, {
+        samplerNodeId: settings.comfySamplerNodeId || "auto",
+        latentNodeId: settings.comfyResolutionNodeId || "auto",
+      });
+      comfyWorkflowDraft.value = JSON.stringify(injected, null, 2);
     };
 
     const saveComfyWorkflowAs = () => {
@@ -3633,9 +3718,12 @@ image###描述###
         let key = settings.comfyWorkflow;
         if (key === "default") key = "自定义工作流";
         else if (key.startsWith("server:")) key = key.slice("server:".length);
+        else if (key.startsWith("import:")) key = key.slice("import:".length);
         map[key] = parsed;
         saveComfyWorkflows(map);
         settings.comfyWorkflow = key;
+        // 已固化到本地自定义，释放会话级导入状态
+        comfyImportedWorkflow.value = null;
         showToast(`已保存工作流：${key}`, "success");
       } catch (e) {
         showToast("保存失败：" + e.message, "error");
@@ -3649,8 +3737,46 @@ image###描述###
       if (sel !== "default" && !sel.startsWith("server:")) delete map[sel];
       saveComfyWorkflows(map);
       settings.comfyWorkflow = "default";
+      comfyImportedWorkflow.value = null;
       loadComfyWorkflowDraft();
       showToast("已恢复默认工作流", "success");
+    };
+
+    // 导入工作流 JSON：自动检测 LiteGraph 图 / API 格式，导入即生效（会话级）
+    const importComfyWorkflow = async (event) => {
+      const file = event.target && event.target.files && event.target.files[0];
+      try {
+        if (!file) return;
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        if (!parsed || typeof parsed !== "object")
+          throw new Error("文件不是有效的 JSON 对象");
+        const name = String(file.name || "导入").replace(/\.json$/i, "");
+        let workflow = null;
+        if (parsed.nodes && Array.isArray(parsed.nodes)) {
+          // LiteGraph 图格式：需完整 object_info 做 graph→API 转换
+          const info = await window.RPHubImageGen.fetchComfyObjectInfoRaw(
+            settings.comfyUrl,
+          );
+          workflow = window.RPHubImageGen.graphToPrompt(parsed, info);
+        } else if (
+          Object.values(parsed).some(
+            (v) => v && typeof v === "object" && v.class_type,
+          )
+        ) {
+          workflow = parsed;
+        } else {
+          throw new Error("不支持的工作流格式（需 LiteGraph 图或 API 格式）");
+        }
+        comfyImportedWorkflow.value = { name, workflow };
+        settings.comfyWorkflow = `import:${name}`;
+        loadComfyWorkflowDraft();
+        showToast(`已导入工作流：${name}`, "success");
+      } catch (e) {
+        showToast("导入失败：" + e.message, "error");
+      } finally {
+        if (event && event.target) event.target.value = "";
+      }
     };
 
     // ===== 生图服务多 provider：占位 + 异步填图 =====
@@ -3673,6 +3799,9 @@ image###描述###
             ...loadComfyWorkflows(),
             ...(sel && sel.startsWith("server:")
               ? { [sel]: server[sel.slice("server:".length)] }
+              : {}),
+            ...(sel && sel.startsWith("import:") && comfyImportedWorkflow.value
+              ? { [sel]: comfyImportedWorkflow.value.workflow }
               : {}),
           };
           return window.RPHubImageGen.generateImageWithComfy(
@@ -3830,9 +3959,20 @@ image###描述###
       },
     );
 
-    // 切换 workflow 时刷新草稿
+    // 切换 workflow 时刷新草稿；离开导入工作流时释放会话级状态
     watch(
       () => settings.comfyWorkflow,
+      (val) => {
+        if (comfyImportedWorkflow.value && !String(val).startsWith("import:"))
+          comfyImportedWorkflow.value = null;
+        if ((settings.imageProvider || "sta1n") === "comfy")
+          loadComfyWorkflowDraft();
+      },
+    );
+
+    // 采样器/分辨率节点切换：源驱动覆盖预览（生成不读 textarea，预期行为）
+    watch(
+      [() => settings.comfySamplerNodeId, () => settings.comfyResolutionNodeId],
       () => {
         if ((settings.imageProvider || "sta1n") === "comfy")
           loadComfyWorkflowDraft();
@@ -15760,8 +15900,13 @@ ${uiTemplateAnalysisSection}
       loadComfyWorkflowDraft,
       saveComfyWorkflowAs,
       resetComfyWorkflow,
+      importComfyWorkflow,
       fetchComfyObjectInfo,
       comfyServerWorkflows,
+      comfyImportedWorkflow,
+      comfySamplerNodeOptions,
+      comfyResolutionNodeOptions,
+      comfyActiveSamplerPosNeg,
       scopeOptions,
       uiTemplatePlacementOptions,
       worldInfoPositionOptions,
