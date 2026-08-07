@@ -84,6 +84,8 @@
     const taskid = ctx.taskid || buildTaskId(prompt, offset);
     const msgId = ctx.msgId || "";
     const storedSrc = ctx.storedSrc || "";
+    const refImage = ctx.refImage || ""; // 图生图参考图服务器 URL；空则文生图
+    const genMode = ctx.genMode || "tag"; // ref=图生图 / tag=文生图
 
     const attrs = [
       `class="rphub-gen-wrap ${storedSrc ? "rphub-gen-done" : "rphub-gen-pending"}"`,
@@ -94,6 +96,8 @@
       `data-prompt="${escapeHtmlAttr(fullPrompt)}"`,
       `data-size="${escapeHtmlAttr(ctx.size || "")}"`,
       `data-seed="${seed}"`,
+      `data-ref-image="${escapeHtmlAttr(refImage)}"`,
+      `data-gen-mode="${escapeHtmlAttr(genMode)}"`,
     ];
     if (storedSrc) attrs.push('data-resolved="1"');
     const attrsStr = attrs.join(" ");
@@ -163,6 +167,68 @@
     },
   };
 
+  /**
+   * 内置默认 img2img workflow（图生图，参照用户 WAI-illustrious 图生图工作流结构）：
+   * CheckpointLoaderSimple(%model%) → LoraLoader(%lora%) → CLIPTextEncode(%prompt%/%negative_prompt%)
+   *   + LoadImage(%ref_image%) → VAEEncode → KSampler(denoise=%denoise%) → VAEDecode → SaveImage
+   * 占位符为 %token% 形式。%ref_image% 在生成时被上传后的参考图文件名替换。
+   */
+  const DEFAULT_COMFY_IMG2IMG_WORKFLOW = {
+    1: {
+      class_type: "CheckpointLoaderSimple",
+      inputs: { ckpt_name: "%model%" },
+    },
+    2: {
+      class_type: "LoraLoader",
+      inputs: {
+        model: ["1", 0],
+        clip: ["1", 1],
+        lora_name: "%lora%",
+        strength_model: "%lora_strength_model%",
+        strength_clip: "%lora_strength_clip%",
+      },
+    },
+    4: {
+      class_type: "CLIPTextEncode",
+      inputs: { text: "%prompt%", clip: ["1", 1] },
+    },
+    5: {
+      class_type: "CLIPTextEncode",
+      inputs: { text: "%negative_prompt%", clip: ["1", 1] },
+    },
+    9: {
+      class_type: "LoadImage",
+      inputs: { image: "%ref_image%", upload: "image" },
+    },
+    10: {
+      class_type: "VAEEncode",
+      inputs: { pixels: ["9", 0], vae: ["1", 2] },
+    },
+    6: {
+      class_type: "KSampler",
+      inputs: {
+        seed: "%seed%",
+        steps: "%steps%",
+        cfg: "%scale%",
+        sampler_name: "%sampler%",
+        scheduler: "%scheduler%",
+        denoise: "%denoise%",
+        model: ["2", 0],
+        positive: ["4", 0],
+        negative: ["5", 0],
+        latent_image: ["10", 0],
+      },
+    },
+    7: {
+      class_type: "VAEDecode",
+      inputs: { samples: ["6", 0], vae: ["1", 2] },
+    },
+    8: {
+      class_type: "SaveImage",
+      inputs: { images: ["7", 0], filename_prefix: "RPHub" },
+    },
+  };
+
   // 文本类占位符（值可能含引号/换行，需 JSON 字符串转义）与简单值占位符
   const TEXT_PLACEHOLDERS = ["prompt", "negative_prompt", "lora"];
   const SIMPLE_PLACEHOLDERS = [
@@ -177,6 +243,7 @@
     "denoise",
     "lora_strength_model",
     "lora_strength_clip",
+    "ref_image", // 图生图参考图文件名（上传后由 ComfyUI 返回）
   ];
 
   /**
@@ -396,6 +463,57 @@
   };
 
   /**
+   * 把参考图上传到 ComfyUI 输入目录（图生图底图）。
+   *
+   * 链路：fetch(参考图服务器 URL) → Blob → FormData（multipart 经服务器反代透传）
+   *   → POST /comfy_api/upload/image → 返回 { name: "<filename>" }
+   *
+   * 参考图 URL 是服务器同源地址（/images/refs/<uuid>.png）或 http(s) 直链，
+   * 经服务器反代（Content-Type 含 boundary）直接透传给本机 ComfyUI。
+   *
+   * @param {string} base        ComfyUI base（如 "/comfy_api"）
+   * @param {string} refImageUrl 参考图服务器 URL
+   * @param {AbortSignal} [signal]
+   * @returns {Promise<string>} 上传后的文件名（如 "abc.png"），供 LoadImage 节点 image 字段使用
+   */
+  const uploadComfyRefImage = async (base, refImageUrl, signal) => {
+    const resp = await fetch(refImageUrl, { signal });
+    if (!resp.ok)
+      throw new Error(`参考图读取失败: HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    const form = new FormData();
+    form.append("image", blob, "ref.png");
+    const upResp = await fetch(`${base}/upload/image`, {
+      method: "POST",
+      body: form,
+      signal,
+    });
+    if (!upResp.ok) {
+      let detail = "";
+      try {
+        detail = (await upResp.json()).error || "";
+      } catch (e) {
+        /* 忽略解析失败 */
+      }
+      throw new Error(`参考图上传失败: HTTP ${upResp.status} ${detail}`);
+    }
+    const json = await upResp.json();
+    const name = json && (json.name || json.filename);
+    if (!name) throw new Error("ComfyUI 未返回上传文件名");
+    return name;
+  };
+
+  /**
+   * 检测工作流是否含 LoadImage 节点（图生图能力判定 + 首个节点注入）
+   */
+  const findLoadImageNodeId = (apiPrompt) => {
+    for (const [id, p] of Object.entries(apiPrompt || {})) {
+      if (p && p.class_type === "LoadImage") return id;
+    }
+    return null;
+  };
+
+  /**
    * ComfyUI：POST /prompt → 轮询 /history/{id} → 返回 /view 图片 URL
    *
    * @param {object} task
@@ -404,31 +522,65 @@
    * @param {AbortSignal} [signal]
    * @returns {Promise<string>}
    */
-  const generateImageWithComfy = async (task, settings, workflows, signal) => {
+  const generateImageWithComfy = async (
+    task,
+    settings,
+    workflows,
+    signal,
+    onFallback,
+  ) => {
     const base = String(settings.comfyUrl || DEFAULT_COMFY_BASE_URL)
       .trim()
       .replace(/\/+$/, "");
     if (!base) throw new Error("未填写 ComfyUI 地址");
 
-    const workflow =
-      (workflows && workflows[settings.comfyWorkflow]) ||
-      DEFAULT_COMFY_WORKFLOW;
+    // 工作流选择：图生图时优先用 settings.comfyWorkflowImg2img 指定的图生图工作流位
+    const isImg2img = Boolean(task.refImage);
+    const wfKey = isImg2img
+      ? settings.comfyWorkflowImg2img || settings.comfyWorkflow || "default"
+      : settings.comfyWorkflow || "default";
+    let workflow =
+      (workflows && workflows[wfKey]) ||
+      (isImg2img ? DEFAULT_COMFY_IMG2IMG_WORKFLOW : DEFAULT_COMFY_WORKFLOW);
+
+    // 图生图：上传参考图并注入 LoadImage 节点；无 LoadImage 节点时回退文生图
+    let refImageName = "";
+    if (isImg2img) {
+      const loadNodeId = findLoadImageNodeId(workflow);
+      if (loadNodeId) {
+        refImageName = await uploadComfyRefImage(base, task.refImage, signal);
+      } else {
+        // 回退：当前工作流无图生图能力，切回文生图工作流（不中断）
+        workflow =
+          (workflows && workflows[settings.comfyWorkflow]) ||
+          DEFAULT_COMFY_WORKFLOW;
+        // 通知调用方提示用户（PRD：无 LoadImage 回退文生图并提示）
+        onFallback?.(wfKey);
+      }
+    }
+
     const resolution = parseResolution(task.size);
+    // 图生图位自动回填参数优先于全局设置（PRD 参数回填：工作流原值为基准，用户改动才覆盖）
+    const slotParams = isImg2img ? settings.comfyWorkflowImg2imgParams : null;
+    const pick = (slotVal, globalVal) =>
+      slotVal !== undefined && slotVal !== null ? slotVal : globalVal;
     const vars = {
       prompt: task.prompt,
       negative_prompt: settings.imageGenNegativePrompt || "",
       seed: task.seed,
-      steps: Number(settings.imageGenSteps) || 40,
-      scale: Number(settings.imageGenCfg) || 6,
-      denoise: Number(settings.imageGenDenoise),
-      sampler: settings.comfySampler || "euler",
-      scheduler: settings.comfyScheduler || "normal",
-      model: settings.comfyModel || "",
-      lora: settings.comfyLora || "",
+      steps: Number(pick(slotParams?.steps, settings.imageGenSteps)) || 40,
+      scale: Number(pick(slotParams?.cfg, settings.imageGenCfg)) || 6,
+      denoise: Number(pick(slotParams?.denoise, settings.imageGenDenoise)),
+      sampler: pick(slotParams?.sampler, settings.comfySampler) || "euler",
+      scheduler:
+        pick(slotParams?.scheduler, settings.comfyScheduler) || "normal",
+      model: pick(slotParams?.model, settings.comfyModel) || "",
+      lora: pick(slotParams?.lora, settings.comfyLora) || "",
       lora_strength_model: Number(settings.comfyLoraStrengthModel),
       lora_strength_clip: Number(settings.comfyLoraStrengthClip),
       width: resolution.width,
       height: resolution.height,
+      ref_image: refImageName, // 图生图参考图文件名；空时 %ref_image% 占位被替换为空字符串
     };
 
     // 注入占位符（选择目标采样器/分辨率/Lora 节点，不污染工作流缓存）后再填充实际值
@@ -438,6 +590,13 @@
       loraNodeId: settings.comfyLoraNodeId || "none",
       loraName: settings.comfyLora || "",
     });
+    // 图生图：把 LoadImage 节点的 image 字段替换为参考图文件名占位符（fillComfyWorkflow 填充）
+    if (refImageName) {
+      const loadNodeId = findLoadImageNodeId(injected);
+      if (loadNodeId && injected[loadNodeId] && injected[loadNodeId].inputs) {
+        injected[loadNodeId].inputs.image = "%ref_image%";
+      }
+    }
     const filled = fillComfyWorkflow(injected, vars);
 
     // 1. 提交 prompt
@@ -857,6 +1016,7 @@
     const samplers = [];
     const latents = [];
     const loras = [];
+    const loadImages = [];
     for (const [id, p] of Object.entries(apiPrompt || {})) {
       const cls = p && p.class_type;
       const inp = p && p.inputs;
@@ -876,11 +1036,51 @@
         });
       } else if (EMPTY_LATENT_TYPES.has(cls)) {
         latents.push({ id: String(id), classType: cls });
+      } else if (cls === "LoadImage") {
+        loadImages.push({ id: String(id), classType: cls });
       } else if (isLoraNode(cls, inp)) {
         loras.push({ id: String(id), classType: cls });
       }
     }
-    return { samplers, latents, loras };
+    return { samplers, latents, loras, loadImages };
+  };
+
+  /**
+   * 解析工作流各关键节点的原值，用于"自动回填"设置面板（PRD 参数回填）。
+   * 返回 { denoise, steps, cfg, sampler, scheduler, model, lora, loraStrengthModel, loraStrengthClip, width, height }，
+   * 未找到的字段缺省 undefined（调用方回退全局设置）。
+   */
+  const extractComfyWorkflowParams = (apiPrompt) => {
+    const out = {};
+    for (const [id, p] of Object.entries(apiPrompt || {})) {
+      const cls = p && p.class_type;
+      const inp = p && p.inputs;
+      if (!cls || !inp) continue;
+      if (K_SAMPLER_TYPES.has(cls)) {
+        if (out.denoise === undefined) {
+          out.denoise = inp.denoise;
+          out.steps = inp.steps;
+          out.cfg = inp.cfg;
+          out.sampler = inp.sampler_name;
+          out.scheduler = inp.scheduler;
+          out.seed = inp.seed;
+        }
+      } else if (cls === "CheckpointLoaderSimple") {
+        if (out.model === undefined) out.model = inp.ckpt_name;
+      } else if (isLoraNode(cls, inp)) {
+        if (out.lora === undefined) {
+          out.lora = inp.lora_name;
+          out.loraStrengthModel = inp.strength_model;
+          out.loraStrengthClip = inp.strength_clip;
+        }
+      } else if (EMPTY_LATENT_TYPES.has(cls)) {
+        if (out.width === undefined) {
+          out.width = inp.width;
+          out.height = inp.height;
+        }
+      }
+    }
+    return out;
   };
 
   /**
@@ -1048,6 +1248,7 @@
     DEFAULT_COMFY_BASE_URL,
     DEFAULT_STA1N_BASE_URL,
     DEFAULT_COMFY_WORKFLOW,
+    DEFAULT_COMFY_IMG2IMG_WORKFLOW,
     TRANSPARENT_GIF,
     buildTaskId,
     buildPlaceholderHtml,
@@ -1060,6 +1261,9 @@
     graphToPrompt,
     injectComfyPlaceholders,
     detectComfyNodes,
+    extractComfyWorkflowParams,
+    findLoadImageNodeId,
+    uploadComfyRefImage,
     normalizeImageGenError,
     createImageGenQueue,
     generateImageWithSta1n,

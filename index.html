@@ -1785,6 +1785,37 @@
                             </svg>
                           </button>
                           <button
+                            v-if="msg.role === 'assistant'"
+                            @click="generateImageForAssistantMessage(index)"
+                            class="message-action-button"
+                            title="为这条内容配图"
+                            aria-label="为这条内容配图"
+                          >
+                            <svg
+                              class="w-3.5 h-3.5 md:w-4 md:h-4"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                              aria-hidden="true"
+                            >
+                              <rect
+                                x="3"
+                                y="3"
+                                width="18"
+                                height="18"
+                                rx="2"
+                                stroke-width="2"
+                              ></rect>
+                              <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                              <path
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                stroke-width="2"
+                                d="M21 15l-5-5L5 21"
+                              ></path>
+                            </svg>
+                          </button>
+                          <button
                             @click="deleteMessage(index)"
                             class="message-action-button message-action-button--danger"
                             title="删除"
@@ -4092,6 +4123,26 @@
                           menu-class="text-sm"
                         >
                         </custom-select>
+                      </div>
+
+                      <!-- 图生图工作流（img2img 独立位） -->
+                      <div class="generation-setting-card">
+                        <label
+                          class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2"
+                          >图生图工作流</label
+                        >
+                        <custom-select
+                          v-model="settings.comfyWorkflowImg2img"
+                          :options="comfyWorkflowImg2imgOptions"
+                          @change="backfillComfyWorkflowParams('img2img', { writePanel: false })"
+                          button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-teal-400 focus:ring-teal-100"
+                          menu-class="text-sm"
+                        >
+                        </custom-select>
+                        <p class="mt-1 text-xs text-gray-400">
+                          角色有参考图时走图生图；生成时自动采用该工作流内置
+                          采样参数（独立于文生图，互不覆盖）
+                        </p>
                       </div>
 
                       <!-- 模型 -->
@@ -7911,6 +7962,12 @@
               >
                 开场白
               </button>
+              <button
+                @click="editorTab = 'imagegen'"
+                :class="['flex-1 px-4 py-2 text-sm font-bold transition-all rounded-lg whitespace-nowrap', editorTab === 'imagegen' ? 'bg-white text-primary-600 shadow-sm' : 'text-gray-500 hover:text-gray-700 hover:bg-white/50']"
+              >
+                生图
+              </button>
             </div>
           </div>
           <div
@@ -8033,6 +8090,203 @@
                 class="w-full bg-gray-50/60 border border-gray-300 rounded-xl px-4 py-3 text-gray-800 focus:ring-2 focus:ring-primary-500 focus:border-primary-500 focus:outline-none flex-1 resize-none shadow-inner transition-all leading-relaxed"
                 placeholder="角色在对话开始时说的第一句话..."
               ></textarea>
+            </div>
+
+            <!-- 生图页签：参考图 + 角色 tag + 模式偏好 + 直出图 -->
+            <div
+              v-if="editorTab === 'imagegen'"
+              class="animate-fade-in flex-1 flex flex-col gap-5 min-h-0 overflow-y-auto custom-scrollbar pr-1"
+            >
+              <!-- 参考图（img2img 底图） -->
+              <div class="flex flex-col gap-2 flex-shrink-0">
+                <label class="block text-sm font-bold text-gray-600"
+                  >角色参考图（图生图底图）</label
+                >
+                <div class="flex items-start gap-3">
+                  <div
+                    class="w-28 h-40 aspect-[2/3] bg-gray-100 rounded-xl border border-gray-200 overflow-hidden relative group flex-shrink-0 shadow-sm"
+                  >
+                    <img
+                      v-if="editingCharacter.data.refImage"
+                      :src="editingCharacter.data.refImage"
+                      class="w-full h-full object-cover"
+                    />
+                    <div
+                      v-else
+                      class="w-full h-full flex items-center justify-center text-3xl text-gray-300"
+                    >
+                      🖼️
+                    </div>
+                    <label
+                      class="absolute inset-0 bg-black/50 flex flex-col items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                    >
+                      <span class="text-white font-bold text-xs">上传</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        @change="handleRefImageUpload"
+                        class="hidden"
+                      />
+                    </label>
+                    <button
+                      v-if="editingCharacter.data.refImage"
+                      @click="clearRefImage"
+                      class="absolute top-1 right-1 w-6 h-6 rounded-full bg-red-500 text-white text-xs flex items-center justify-center shadow-md"
+                      title="清除参考图"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div class="flex flex-col gap-2 flex-1">
+                    <input
+                      ref="refImageInput"
+                      type="file"
+                      accept="image/*"
+                      @change="handleRefImageUpload"
+                      class="hidden"
+                    />
+                    <button
+                      @click="openRefImagePicker"
+                      :disabled="refImageUploading"
+                      class="px-4 py-2 rounded-xl border border-gray-300 bg-white text-sm text-gray-700 hover:bg-gray-50 transition-all disabled:opacity-50"
+                    >
+                      {{ refImageUploading ? "上传中..." : "上传参考图" }}
+                    </button>
+                    <p class="text-xs text-gray-400 leading-relaxed">
+                      压缩到 1024px 落盘服务器（images/refs/），与头像职责分离；
+                      有参考图且用 ComfyUI 时，对话内生成自动走图生图。
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 角色 tag（waiIllustrious 角色库，中文名搜索） -->
+              <div class="flex flex-col gap-2 flex-shrink-0">
+                <label class="block text-sm font-bold text-gray-600"
+                  >角色 tag（文生图主角）</label
+                >
+                <div class="relative">
+                  <input
+                    v-model="characterTagQuery"
+                    @input="onCharacterTagSearch"
+                    @focus="characterTagFocused = true"
+                    @blur="hideCharacterTagResults"
+                    type="text"
+                    class="w-full bg-gray-50/60 border border-gray-300 rounded-xl px-4 py-2.5 text-gray-800 focus:ring-2 focus:ring-primary-500 focus:border-primary-500 focus:outline-none text-sm shadow-inner transition-all"
+                    placeholder="输入中文角色名搜索..."
+                  />
+                  <div
+                    v-if="characterTagFocused && characterTagResults.length"
+                    class="absolute z-20 mt-1 w-full max-h-56 overflow-y-auto rounded-xl border border-gray-200 bg-white shadow-xl custom-scrollbar"
+                  >
+                    <button
+                      v-for="r in characterTagResults"
+                      :key="r.en"
+                      @mousedown.prevent="selectCharacterTag(r)"
+                      class="w-full text-left px-4 py-2 hover:bg-primary-50 flex items-center justify-between gap-2 border-b border-gray-50 last:border-0"
+                    >
+                      <span class="text-sm text-gray-700 truncate"
+                        >{{ r.cn }}</span
+                      >
+                      <span
+                        class="text-xs text-gray-400 font-mono truncate max-w-[50%]"
+                        >{{ r.en }}</span
+                      >
+                    </button>
+                  </div>
+                </div>
+                <div
+                  v-if="editingCharacter.data.imageTag"
+                  class="flex items-center gap-2 flex-wrap"
+                >
+                  <span
+                    class="text-xs bg-primary-50 text-primary-700 border border-primary-200 rounded-lg px-2 py-1 font-mono"
+                    >{{ editingCharacter.data.imageTag }}</span
+                  >
+                  <span
+                    v-if="getTagAssistFor(editingCharacter.data.imageTag)"
+                    class="text-xs text-gray-400"
+                    >+ {{ getTagAssistFor(editingCharacter.data.imageTag) }}</span
+                  >
+                  <button
+                    @click="editingCharacter.data.imageTag = ''"
+                    class="text-xs text-red-500 hover:underline"
+                  >
+                    清除
+                  </button>
+                </div>
+                <p class="text-xs text-gray-400">
+                  waiIllustriousSDXL_v160 角色库（5090 角色），选中后英文 tag
+                  会拼进生成提示词。
+                </p>
+              </div>
+
+              <!-- 模式偏好 -->
+              <div class="flex flex-col gap-2 flex-shrink-0">
+                <label class="block text-sm font-bold text-gray-600"
+                  >生图模式偏好</label
+                >
+                <div class="flex gap-2 flex-wrap">
+                  <label
+                    v-for="m in imageGenModeOptions"
+                    :key="m.value"
+                    class="cursor-pointer flex items-center gap-2 px-3 py-2 rounded-xl border text-sm transition-all"
+                    :class="editingCharacter.data.imageGenMode === m.value ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-gray-300 bg-white text-gray-600 hover:border-gray-400'"
+                  >
+                    <input
+                      type="radio"
+                      :value="m.value"
+                      v-model="editingCharacter.data.imageGenMode"
+                      class="accent-primary-500"
+                    />
+                    {{ m.label }}
+                  </label>
+                </div>
+                <p class="text-xs text-gray-400">
+                  自动：有参考图且用 ComfyUI → 图生图，否则文生图；用参考图：强制图生图（无参考图回退文生图）；用
+                  tag：强制文生图。
+                </p>
+              </div>
+
+              <!-- 生成角色图（直出图） -->
+              <div class="flex flex-col gap-2 flex-shrink-0 border-t border-gray-100 pt-4">
+                <button
+                  @click="generateCharacterImage(editingCharacter.data)"
+                  :disabled="characterGenBusy"
+                  class="px-5 py-2.5 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 text-white rounded-xl text-sm font-bold shadow-md transition-all active:scale-95 flex items-center justify-center gap-2"
+                >
+                  <svg
+                    v-if="characterGenBusy"
+                    class="w-4 h-4 animate-spin"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
+                    ></path>
+                  </svg>
+                  {{ characterGenBusy ? "生成中..." : "生成角色图" }}
+                </button>
+                <div
+                  v-if="characterGenResult"
+                  class="rounded-xl border border-gray-200 overflow-hidden bg-gray-50"
+                >
+                  <img
+                    :src="characterGenResult"
+                    class="w-full max-h-[50vh] object-contain"
+                  />
+                </div>
+                <p v-if="characterGenError" class="text-xs text-red-500">
+                  生成失败：{{ characterGenError }}
+                </p>
+                <p class="text-xs text-gray-400">
+                  直接出图，不依赖 AI 触发；走与对话内相同的模式判定链路。
+                </p>
+              </div>
             </div>
           </div>
           <div

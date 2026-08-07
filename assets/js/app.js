@@ -750,7 +750,9 @@ createApp({
       imageGenApiKey: "",
       imageGenBaseUrl: "",
       comfyUrl: "/comfy_api",
-      comfyWorkflow: "default",
+      comfyWorkflow: "default", // 文生图工作流位
+      comfyWorkflowImg2img: "default", // 图生图工作流位（含"默认"选项 = 内置图生图模板）
+      comfyWorkflowImg2imgParams: null, // 图生图位自动回填参数（生成时优先于全局设置）
       comfyModel: "",
       comfySampler: "euler",
       comfyScheduler: "normal",
@@ -3155,6 +3157,19 @@ image###描述###
                 delete char.scenario;
                 migrated = true;
               }
+              // img2img 角色卡字段：旧卡补齐默认值（refImage 空 / imageTag 空 / imageGenMode auto）
+              if (char.refImage === undefined) {
+                char.refImage = "";
+                migrated = true;
+              }
+              if (char.imageTag === undefined) {
+                char.imageTag = "";
+                migrated = true;
+              }
+              if (!["auto", "ref", "tag"].includes(char.imageGenMode)) {
+                char.imageGenMode = "auto";
+                migrated = true;
+              }
               if (Array.isArray(char.worldInfo)) {
                 char.worldInfo = char.worldInfo
                   .map(normalizeWorldInfoEntry)
@@ -3552,7 +3567,7 @@ image###描述###
       }
     };
 
-    const comfyWorkflowOptions = computed(() => {
+    const buildComfyWorkflowOptions = () => {
       const map = loadComfyWorkflows();
       const keys = Object.keys(map || {});
       const server = comfyServerWorkflows.value || {};
@@ -3574,7 +3589,108 @@ image###描述###
             ]
           : []),
       ];
-    });
+    };
+    const comfyWorkflowOptions = computed(() => buildComfyWorkflowOptions());
+    // 图生图工作流位：复用同一组选项（default = 内置图生图模板）
+    const comfyWorkflowImg2imgOptions = computed(() => buildComfyWorkflowOptions());
+
+    // 内置图生图模板的采样参数（图生图位选"默认"时的回填基准；PRD：denoise 0.66 不被全局 1.0 覆盖）
+    const DEFAULT_IMG2IMG_WORKFLOW_PARAMS = {
+      denoise: 0.66,
+      steps: 40,
+      cfg: 6,
+      sampler: "euler",
+      scheduler: "normal",
+    };
+
+    // 解析指定工作流位的"回填参数"（{denoise,steps,cfg,sampler,scheduler,model,lora,...}）
+    // "default" 位 → 内置模板 canonical 参数；自定义/服务端/导入 → 解析目标节点原值
+    const resolveComfySlotParams = (slot) => {
+      const isImg2img = slot === "img2img";
+      const wfKey = isImg2img
+        ? settings.comfyWorkflowImg2img || "default"
+        : settings.comfyWorkflow || "default";
+      if (wfKey === "default")
+        return isImg2img ? { ...DEFAULT_IMG2IMG_WORKFLOW_PARAMS } : null;
+      const server = comfyServerWorkflows.value || {};
+      const all = {
+        ...loadComfyWorkflows(),
+        ...Object.fromEntries(
+          Object.entries(server).map(([k, v]) => [`server:${k}`, v]),
+        ),
+        ...(comfyImportedWorkflow.value
+          ? {
+              [`import:${comfyImportedWorkflow.value.name}`]:
+                comfyImportedWorkflow.value.workflow,
+            }
+          : {}),
+      };
+      const wf = all[wfKey];
+      if (!wf) return null;
+      return window.RPHubImageGen.extractComfyWorkflowParams(wf);
+    };
+
+    // 自动回填：把指定工作流位的参数应用到设置面板
+    //  - img2img 位：写全局设置（面板展示）同时存独立 comfyWorkflowImg2imgParams（生成时优先，避免与 txt2img 全局值互踩）
+    //  - writePanel=false：仅存 img2imgParams 不动全局（用于加载时静默播种，不覆盖用户已存设置）
+    let _backfillingParams = false;
+    const backfillComfyWorkflowParams = (slot, { writePanel = true } = {}) => {
+      const params = resolveComfySlotParams(slot);
+      if (!params) return;
+      if (slot === "img2img") {
+        settings.comfyWorkflowImg2imgParams = {
+          denoise: params.denoise,
+          steps: params.steps,
+          cfg: params.cfg,
+          sampler: params.sampler,
+          scheduler: params.scheduler,
+          model: params.model,
+          lora: params.lora,
+        };
+      }
+      if (!writePanel) return;
+      _backfillingParams = true;
+      try {
+        if (params.denoise !== undefined)
+          settings.imageGenDenoise = params.denoise;
+        if (params.steps !== undefined) settings.imageGenSteps = params.steps;
+        if (params.cfg !== undefined) settings.imageGenCfg = params.cfg;
+        if (params.sampler) settings.comfySampler = params.sampler;
+        if (params.scheduler) settings.comfyScheduler = params.scheduler;
+        if (params.model) settings.comfyModel = params.model;
+        if (params.lora) settings.comfyLora = params.lora;
+        if (params.loraStrengthModel !== undefined)
+          settings.comfyLoraStrengthModel = params.loraStrengthModel;
+        if (params.loraStrengthClip !== undefined)
+          settings.comfyLoraStrengthClip = params.loraStrengthClip;
+        if (
+          params.width &&
+          params.height &&
+          settings.imageGenResolution === "custom"
+        ) {
+          settings.comfyCustomResolution = `${params.width}x${params.height}`;
+        }
+      } finally {
+        _backfillingParams = false;
+      }
+    };
+
+    // 用户在设置面板手动改某参数 → 同步到图生图位参数（用户显式改动优先于回填原值，PRD）
+    const _syncImg2imgParam = (field, val) => {
+      if (_backfillingParams) return;
+      const p = settings.comfyWorkflowImg2imgParams;
+      if (!p) return;
+      if (p[field] !== val) {
+        settings.comfyWorkflowImg2imgParams = { ...p, [field]: val };
+      }
+    };
+    watch(() => settings.imageGenDenoise, (v) => _syncImg2imgParam("denoise", v));
+    watch(() => settings.imageGenSteps, (v) => _syncImg2imgParam("steps", v));
+    watch(() => settings.imageGenCfg, (v) => _syncImg2imgParam("cfg", v));
+    watch(() => settings.comfySampler, (v) => _syncImg2imgParam("sampler", v));
+    watch(() => settings.comfyScheduler, (v) => _syncImg2imgParam("scheduler", v));
+    watch(() => settings.comfyModel, (v) => _syncImg2imgParam("model", v));
+    watch(() => settings.comfyLora, (v) => _syncImg2imgParam("lora", v));
 
     const comfyModelOptions = computed(() =>
       (comfyObjectInfo.value.models || []).map((m) => ({ value: m, label: m })),
@@ -3845,43 +3961,50 @@ image###描述###
       if (changed) saveChatHistoryNow();
     };
 
+    // 统一的生图执行函数：对话占位队列与角色卡直出图共用（provider 分发 + comfy 工作流合并）
+    const runImageGenGenerate = async (task, signal) => {
+      const provider = task.provider || settings.imageProvider || "sta1n";
+      if (provider === "openai")
+        return window.RPHubImageGen.generateImageWithOpenAI(
+          task,
+          settings,
+          signal,
+        );
+      if (provider === "comfy") {
+        const server = comfyServerWorkflows.value || {};
+        // 合并全部服务端/导入工作流：文生图与图生图两个工作流位都能命中任意来源
+        const merged = {
+          ...loadComfyWorkflows(),
+          ...Object.fromEntries(
+            Object.entries(server).map(([k, v]) => [`server:${k}`, v]),
+          ),
+          ...(comfyImportedWorkflow.value
+            ? {
+                [`import:${comfyImportedWorkflow.value.name}`]:
+                  comfyImportedWorkflow.value.workflow,
+              }
+            : {}),
+        };
+        return window.RPHubImageGen.generateImageWithComfy(
+          task,
+          settings,
+          merged,
+          signal,
+          // 无 LoadImage 回退文生图时提示用户（PRD 触发加固）
+          () => showToast("当前图生图工作流无 LoadImage 节点，已回退文生图", "info"),
+        );
+      }
+      return window.RPHubImageGen.generateImageWithSta1n(
+        task,
+        settings,
+        cardUtils,
+      );
+    };
+
     const imageGenQueue = window.RPHubImageGen.createImageGenQueue({
       concurrency: 3,
       timeoutMs: 120000,
-      generate: async (task, signal) => {
-        const provider = task.provider || settings.imageProvider || "sta1n";
-        if (provider === "openai")
-          return window.RPHubImageGen.generateImageWithOpenAI(
-            task,
-            settings,
-            signal,
-          );
-        if (provider === "comfy") {
-          const sel = settings.comfyWorkflow;
-          const server = comfyServerWorkflows.value || {};
-          // 合并服务端工作流，使 generateImageWithComfy 按 settings.comfyWorkflow 直接命中
-          const merged = {
-            ...loadComfyWorkflows(),
-            ...(sel && sel.startsWith("server:")
-              ? { [sel]: server[sel.slice("server:".length)] }
-              : {}),
-            ...(sel && sel.startsWith("import:") && comfyImportedWorkflow.value
-              ? { [sel]: comfyImportedWorkflow.value.workflow }
-              : {}),
-          };
-          return window.RPHubImageGen.generateImageWithComfy(
-            task,
-            settings,
-            merged,
-            signal,
-          );
-        }
-        return window.RPHubImageGen.generateImageWithSta1n(
-          task,
-          settings,
-          cardUtils,
-        );
-      },
+      generate: (task, signal) => runImageGenGenerate(task, signal),
       onResolve: async (taskid, src) => {
         // 1) 生成完成即刻先用原始 src 填图（ComfyUI 输出已就绪，即时显示，不等持久化）
         applyImageGenResultToAll(taskid, src, null);
@@ -3902,8 +4025,72 @@ image###描述###
       },
     });
 
-    // 纯函数：读 settings 组装 ctx，产出占位 HTML（无副作用）
+    // ---- 角色 tag 数据（data/characters.json，一次 fetch + 本地缓存）----
+    const characterTagData = ref(null);
+    const loadCharacterTagData = async (force = false) => {
+      if (!force && characterTagData.value) return characterTagData.value;
+      try {
+        const resp = await fetch("data/characters.json");
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        characterTagData.value = await resp.json();
+      } catch (e) {
+        console.warn("角色 tag 数据加载失败:", e);
+        characterTagData.value = null;
+      }
+      return characterTagData.value;
+    };
+    // 中文名/英文 tag 模糊搜索（下拉候选，最多 20 条）
+    const searchCharacterTags = (query) => {
+      const data = characterTagData.value;
+      if (!data || !query) return [];
+      const q = String(query).trim().toLowerCase();
+      if (!q) return [];
+      const hits = [];
+      for (const c of data.characters || []) {
+        if (c.cn.toLowerCase().includes(q) || c.en.toLowerCase().includes(q)) {
+          hits.push(c);
+          if (hits.length >= 20) break;
+        }
+      }
+      return hits;
+    };
+    // 按英文 tag 精确取 tag_assist 追加词（如 "male"）
+    const getTagAssistFor = (enTag) =>
+      characterTagData.value?.tagAssist?.[enTag] || "";
+
+    // ---- 角色生图模式判定 + 角色 tag 注入（对话内与角色卡直出图共用，PRD「模式判定」）----
+    // 三层优先级：
+    //   1) imageGenMode 显式：ref=强制图生图（无参考图回退文生图）/ tag=强制文生图
+    //   2) auto：有参考图 且 provider=ComfyUI → 图生图，否则文生图
+    //   3) provider ≠ ComfyUI（sta1n/OpenAI 无图输入能力）→ 一律文生图
+    const determineImageGenMode = (char) => {
+      const provider = settings.imageProvider || "sta1n";
+      if (provider !== "comfy") return "tag";
+      const mode = char?.imageGenMode || "auto";
+      if (mode === "ref") return char?.refImage ? "ref" : "tag";
+      if (mode === "tag") return "tag";
+      return char?.refImage ? "ref" : "tag";
+    };
+    // 角色 tag + tag_assist 追加词 → 拼进 prompt 的角色标识串
+    const buildRoleTagPrompt = (char) => {
+      const en = String(char?.imageTag || "").trim();
+      if (!en) return "";
+      const assist = getTagAssistFor(en);
+      return assist ? `${en}, ${assist}` : en;
+    };
+    // 组装角色生图上下文：{ mode: "ref"|"tag", refImage, characterTag }
+    const buildCharacterGenContext = (char) => {
+      const mode = determineImageGenMode(char);
+      const refImage = mode === "ref" && char?.refImage ? char.refImage : "";
+      return { mode, refImage, characterTag: buildRoleTagPrompt(char) };
+    };
+
+    // 对话内 image### 提示词最大长度（超长自动截断，PRD 触发加固）
+    const MAX_IMAGE_GEN_PROMPT_LEN = 300;
+
+    // 纯函数：读 settings + 当前角色组装 ctx，产出占位 HTML（无副作用）
     // msgCtx: { msgId, images }——图片持久化反查消息与命中已存图片
+    // 角色 tag 注入 prompt（img2img 作身份强化 / txt2img 作主角），图生图带参考图
     const buildImageGenPlaceholder = (prompt, offset, msgCtx = null) => {
       const provider = settings.imageProvider || "sta1n";
       const resolution = settings.imageGenResolution;
@@ -3913,16 +4100,31 @@ image###描述###
           : provider === "comfy" && resolution === "custom"
             ? settings.comfyCustomResolution || "1024x1024"
             : normalizeImageGenResolution(resolution, provider);
-      const taskid = window.RPHubImageGen.buildTaskId(prompt, offset);
+      const truncated = String(prompt || "").slice(0, MAX_IMAGE_GEN_PROMPT_LEN);
+      // taskid 基于原始提示词（兼容旧消息持久化反查，>300 字时截断会改变键导致重渲染不命中）
+      const taskid = window.RPHubImageGen.buildTaskId(
+        String(prompt || ""),
+        offset,
+      );
       const msgId = msgCtx?.msgId || "";
       const storedSrc = msgCtx?.images?.[taskid] || "";
-      return window.RPHubImageGen.buildPlaceholderHtml(prompt, offset, {
+      const genCtx = buildCharacterGenContext(currentCharacter.value);
+      // 顺序：角色 tag → 全局默认 tags（artist/style）→ 消息提示词
+      const enrichedPrompt = [
+        genCtx.characterTag,
+        settings.imageGenDefaultTags || "",
+        truncated,
+      ]
+        .filter(Boolean)
+        .join(",");
+      return window.RPHubImageGen.buildPlaceholderHtml(enrichedPrompt, offset, {
         provider,
-        defaultTags: settings.imageGenDefaultTags || "",
         size,
         taskid: msgId ? taskid : undefined,
         msgId,
         storedSrc,
+        refImage: genCtx.refImage,
+        genMode: genCtx.mode,
       });
     };
 
@@ -3932,6 +4134,8 @@ image###描述###
       provider: wrap.dataset.provider || settings.imageProvider || "sta1n",
       size: wrap.dataset.size || "1024x1024",
       seed: Number(wrap.dataset.seed) || 0,
+      refImage: wrap.dataset.refImage || "", // 图生图参考图服务器 URL；空则文生图
+      genMode: wrap.dataset.genMode || "tag", // ref=图生图 / tag=文生图
     });
 
     const applyImageGenResultToNode = (wrap, src, errorMsg) => {
@@ -4010,6 +4214,78 @@ image###描述###
         const wrap = btn.closest("[data-rphub-gen]");
         if (wrap) retryImageGenNode(wrap);
       });
+    };
+
+    // 助手消息"配图"按钮：以该条消息正文当提示词，追加占位触发同一生成管线
+    // （msg.attachedImages 驱动 Vue 重渲染 → renderMarkdown 重建占位 → 扫描队列）
+    const generateImageForAssistantMessage = (msgIndex) => {
+      const msg = chatHistory.value[msgIndex];
+      if (!msg) return;
+      const prompt = String(msg.content || msg.text || "").trim();
+      if (!prompt) {
+        showToast("该消息正文为空，无法配图", "info");
+        return;
+      }
+      if (!msg.attachedImages) msg.attachedImages = [];
+      if (msg.attachedImages.some((a) => a.prompt === prompt)) {
+        showToast("该消息已配过图", "info");
+        return;
+      }
+      msg.attachedImages.push({ prompt }); // 触发重渲染 → 占位 → 扫描进队列
+      showToast("正在配图...", "info");
+      loadCharacterTagData(); // 确保角色 tag 数据已加载（prompt 注入角色 tag 用）
+    };
+
+    // 角色卡"生成角色图"直出图：走同一模式判定链路，结果供生图页签展示
+    const characterGenBusy = ref(false);
+    const characterGenResult = ref("");
+    const characterGenError = ref("");
+    const generateCharacterImage = async (char = editingCharacter.data) => {
+      const genCtx = buildCharacterGenContext(char);
+      const provider = settings.imageProvider || "sta1n";
+      if (!genCtx.refImage && !genCtx.characterTag) {
+        showToast("请先上传参考图或设置角色 tag", "info");
+        return;
+      }
+      characterGenBusy.value = true;
+      characterGenResult.value = "";
+      characterGenError.value = "";
+      try {
+        const size =
+          provider === "sta1n"
+            ? settings.imageSize
+            : provider === "comfy" &&
+                settings.imageGenResolution === "custom"
+              ? settings.comfyCustomResolution || "1024x1024"
+              : normalizeImageGenResolution(
+                  settings.imageGenResolution,
+                  provider,
+                );
+        const task = {
+          taskid: `char_${char.uuid || "new"}_${Date.now()}`,
+          prompt: genCtx.characterTag || "portrait, best quality",
+          provider,
+          size,
+          seed: Math.floor(Math.random() * 0x7fffffff),
+          refImage: genCtx.refImage, // 图生图参考图；无则文生图
+          genMode: genCtx.mode,
+        };
+        let src = await runImageGenGenerate(task);
+        // 与对话内生成一致：落盘 images/generated/ 持久化（PRD「出图落盘」），
+        // 刷新不丢、局域网可访问；失败则降级为临时 URL 显示。
+        try {
+          src = (await persistChatImage(src)) || src;
+        } catch (e) {
+          console.warn("角色图持久化失败:", e);
+        }
+        characterGenResult.value = src;
+        showToast("角色图已生成", "success");
+      } catch (e) {
+        characterGenError.value = e?.message || "生成失败";
+        showToast("角色图生成失败: " + characterGenError.value, "error");
+      } finally {
+        characterGenBusy.value = false;
+      }
     };
 
     // provider 切换：归一化分辨率 + 重建正则/世界书 + comfy 时拉取节点
@@ -6366,9 +6642,30 @@ ${content}
             .map((k) => `${k}=${msg.images[k]}`)
             .join("&")
         : "";
-      const cacheKey = `${role}_${skipRegex}_${msg?.id || ""}_${imgFp}_${text}`;
+      const cacheKey = `${role}_${skipRegex}_${msg?.id || ""}_${imgFp}_${
+        msg?.attachedImages?.length || 0
+      }_${text}`;
       if (renderMarkdownCache.has(cacheKey))
         return renderMarkdownCache.get(cacheKey);
+
+      // 配图附加图：重建助手消息"配图"按钮生成的图片占位（msg.attachedImages），
+      // 与 image### 占位共用同一持久化反查（msg.images[taskid] 命中已完成形态）
+      let attachedImagesHtml = "";
+      if (msg?.attachedImages?.length) {
+        attachedImagesHtml = msg.attachedImages
+          .map((ai) =>
+            buildImageGenPlaceholder(ai.prompt || "", 0, {
+              msgId: msg.id || null,
+              images: msg.images,
+            }),
+          )
+          .join("");
+      }
+      // 附加图与正文走同一净化规则（配图占位虽已 escapeHtmlAttr 转义，仍过一遍 DOMPurify 白名单）
+      const withAttached = (htmlStr) =>
+        attachedImagesHtml
+          ? htmlStr + DOMPurify.sanitize(attachedImagesHtml, cleanConfig)
+          : htmlStr;
 
       let processed = text;
 
@@ -6506,7 +6803,7 @@ ${content}
           resultHtml += DOMPurify.sanitize(marked.parse(postText), cleanConfig);
         }
 
-        return cacheRenderedMarkdown(cacheKey, resultHtml);
+        return cacheRenderedMarkdown(cacheKey, withAttached(resultHtml));
       }
 
       const lowerTrimmed = trimmed.toLowerCase();
@@ -6520,7 +6817,7 @@ ${content}
       if (startsWithBlockHtml && !trimmed.includes("```")) {
         // Directly sanitize and return, skipping Markdown parsing
         const result = DOMPurify.sanitize(processed, cleanConfig);
-        return cacheRenderedMarkdown(cacheKey, result);
+        return cacheRenderedMarkdown(cacheKey, withAttached(result));
       }
 
       // For mixed content (Text + HTML widgets like HUDs/Status Bars),
@@ -6628,13 +6925,13 @@ ${content}
 
         if (modified) {
           const result = doc.body.innerHTML;
-          return cacheRenderedMarkdown(cacheKey, result);
+          return cacheRenderedMarkdown(cacheKey, withAttached(result));
         }
       } catch (e) {
         console.error("Error rendering HTML preview:", e);
       }
 
-      return cacheRenderedMarkdown(cacheKey, html);
+      return cacheRenderedMarkdown(cacheKey, withAttached(html));
     };
 
     // API & Models
@@ -12627,6 +12924,10 @@ ${content}
         uuid: generateUUID(),
         createdAt: Date.now(),
         uiTemplates: [],
+        // img2img 角色卡字段
+        refImage: "", // 角色参考图服务器 URL（/images/refs/<uuid>.png），与 avatar 展示图职责分离
+        imageTag: "", // waiIllustrious 英文角色 tag（如 2b (nier automata)）
+        imageGenMode: "auto", // auto / ref（强制图生图） / tag（强制文生图）
       };
       editorTab.value = "basic";
       showCharacterEditor.value = true;
@@ -13066,7 +13367,9 @@ ${content}
       const imageGenRegexName = "NAI画图正则";
       const imageGenRegexContent = {
         name: imageGenRegexName,
-        regex: "/image###([\\s\\S]*?)###/g",
+        // 宽容解析：缺闭合 ### 时在行尾/消息尾兜底识别（PRD 触发加固）
+        // m 标志使 $ 匹配行尾：缺闭合时只吞到当前行，避免吞掉消息剩余段落
+        regex: "/image###([\\s\\S]+?)(?:###|$)/gm",
         replacement: "[自动生图占位]",
         placement: [2],
         markdownOnly: true,
@@ -13975,6 +14278,64 @@ image###生成的提示词###
         reader.readAsDataURL(file);
       }
     };
+
+    // ---- 角色卡"生图"页签：参考图上传 / 角色 tag 搜索 / 模式偏好 ----
+    const refImageInput = ref(null);
+    const refImageUploading = ref(false);
+    const openRefImagePicker = () => refImageInput.value?.click();
+    // 参考图上传：canvas 压缩到 1024px（比头像 400px 高）→ 服务器 refs 分类落盘 → 记 URL
+    const handleRefImageUpload = (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const compressed = await compressImage(e.target.result, 1024, 0.9);
+          refImageUploading.value = true;
+          const { url } = await window.RPHubServerApi.imageSave({
+            data: compressed,
+            category: "refs",
+          });
+          editingCharacter.data.refImage = url;
+          showToast("参考图已上传", "success");
+        } catch (err) {
+          console.error("参考图上传失败:", err);
+          showToast("参考图上传失败: " + (err?.message || ""), "error");
+        } finally {
+          refImageUploading.value = false;
+        }
+      };
+      reader.readAsDataURL(file);
+    };
+    const clearRefImage = () => {
+      editingCharacter.data.refImage = "";
+    };
+
+    // 角色 tag 中文名搜索（下拉候选）
+    const characterTagQuery = ref("");
+    const characterTagResults = ref([]);
+    const characterTagFocused = ref(false);
+    const onCharacterTagSearch = () => {
+      characterTagResults.value = searchCharacterTags(characterTagQuery.value);
+    };
+    const selectCharacterTag = (tag) => {
+      editingCharacter.data.imageTag = tag.en;
+      characterTagQuery.value = "";
+      characterTagResults.value = [];
+      characterTagFocused.value = false;
+    };
+    const hideCharacterTagResults = () => {
+      setTimeout(() => {
+        characterTagFocused.value = false;
+      }, 150);
+    };
+
+    // 生图模式偏好选项（auto=自动 / ref=强制图生图 / tag=强制文生图）
+    const imageGenModeOptions = [
+      { value: "auto", label: "自动" },
+      { value: "ref", label: "用参考图" },
+      { value: "tag", label: "用 tag" },
+    ];
 
     // Import/Export Logic
 
@@ -14893,6 +15254,14 @@ image###生成的提示词###
 
       await loadData();
       fetchQuota(); // Fetch quota after saved settings are loaded
+
+      // 播种图生图位自动回填参数（仅当从未保存过；不覆盖用户已存的全局设置）
+      if (settings.comfyWorkflowImg2imgParams === null) {
+        backfillComfyWorkflowParams("img2img", { writePanel: false });
+      }
+
+      // 预加载角色 tag 数据（中文名搜索角色 tag 下拉用）
+      loadCharacterTagData();
 
       // 生图占位异步填图：MutationObserver 扫描 + 重试事件委托
       setupImageGenObserver();
@@ -16017,6 +16386,16 @@ ${uiTemplateAnalysisSection}
       imageStyleOptions,
       imageSizeOptions,
       imageGenCountOptions,
+      // 角色 tag 数据 + 生图入口
+      characterTagData,
+      loadCharacterTagData,
+      searchCharacterTags,
+      getTagAssistFor,
+      generateImageForAssistantMessage,
+      characterGenBusy,
+      characterGenResult,
+      characterGenError,
+      generateCharacterImage,
       // 生图服务多 provider
       imageProviderOptions,
       imageGenModelOptions,
@@ -16024,6 +16403,8 @@ ${uiTemplateAnalysisSection}
       comfyResolutionOptions,
       comfyObjectInfo,
       comfyWorkflowOptions,
+      comfyWorkflowImg2imgOptions, // 图生图工作流位选项（与文生图位同源）
+      backfillComfyWorkflowParams, // 图生图位工作流选择变化时的参数自动回填
       comfyModelOptions,
       comfySamplerOptions,
       comfySchedulerOptions,
@@ -16431,6 +16812,19 @@ ${uiTemplateAnalysisSection}
       getCharacterWICount,
       getCharacterRegexCount,
       handleAvatarUpload,
+      // 角色卡"生图"页签
+      refImageInput,
+      refImageUploading,
+      openRefImagePicker,
+      handleRefImageUpload,
+      clearRefImage,
+      characterTagQuery,
+      characterTagResults,
+      characterTagFocused,
+      onCharacterTagSearch,
+      selectCharacterTag,
+      hideCharacterTagResults,
+      imageGenModeOptions,
       importCharacter,
       createPreset,
       editPreset,

@@ -29,7 +29,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 # ---- 常量 ----
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGES_DIR = os.path.join(ROOT_DIR, "images")
-CATEGORIES = ("generated", "library")  # 图片分类白名单
+CATEGORIES = ("generated", "library", "refs")  # 图片分类白名单（refs=角色卡参考图）
 COMFY_TARGET = "http://127.0.0.1:8188"
 COMFY_PROXY_PREFIX = "/comfy_api"
 MAX_BODY_BYTES = 64 * 1024 * 1024  # PUT/POST body 上限 64MB

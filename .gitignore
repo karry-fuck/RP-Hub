@@ -11,8 +11,10 @@ Thumbs.db
 # 服务器运行时数据（server.py）
 rp_hub_data.db
 rp_hub_data.db.*
+rp_hub_data.db-*
 images/generated/
 images/library/
+images/refs/
 
 # Python
 __pycache__/
