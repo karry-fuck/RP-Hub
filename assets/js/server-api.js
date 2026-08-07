@@ -87,11 +87,38 @@
     return res.json();
   };
 
+  /**
+   * 删除服务器图片文件（清理对话等场景回收磁盘）。
+   * @param {string} url 形如 /images/generated/<uuid>.png（msg.images 存的值）；
+   *                      非本服务器图片地址（外部直链/data URL）无磁盘文件，静默跳过
+   * @returns {Promise<{ok:boolean}>}
+   */
+  const imageDelete = async (url) => {
+    const m = String(url || "").match(
+      /^\/images\/([A-Za-z0-9_-]+)\/([A-Za-z0-9._-]+)$/,
+    );
+    if (!m) return { ok: false };
+    const res = await fetch(`/api/images/${m[1]}/${m[2]}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      let detail = "";
+      try {
+        detail = (await res.json()).error || "";
+      } catch (e) {
+        /* 忽略解析失败 */
+      }
+      throw new Error(`图片删除失败: HTTP ${res.status} ${detail}`);
+    }
+    return res.json();
+  };
+
   window.RPHubServerApi = {
     kvGet,
     kvSet,
     kvDelete,
     kvList,
     imageSave,
+    imageDelete,
   };
 })();

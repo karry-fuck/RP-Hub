@@ -7253,12 +7253,56 @@ ${content}
 
     const clearChat = () => {
       confirmAction(
-        "确定要清空聊天记录吗？记忆也将一并清空，此操作无法撤销。",
-        () => {
+        "确定要清空聊天记录吗？该角色的全部剧情分支对话、记忆、变量记录与聊天图片也将一并删除，此操作无法撤销。",
+        async () => {
           abortUiTemplateUpdate();
           abortVectorBatchExtraction();
           abortClassicBatchExtraction();
           resetChatRenderWindow();
+          const charUuid = currentCharacter.value?.uuid;
+
+          // 收集本角色全部分支 scope id（主线 + 各分支），含服务器已存但内存未加载的
+          const scopeIds = new Set();
+          if (charUuid) {
+            scopeIds.add(charUuid);
+            (storyBranches.value || [])
+              .filter(
+                (branch) => branch?.id && branch.id !== STORY_BRANCH_MAIN_ID,
+              )
+              .forEach((branch) =>
+                scopeIds.add(getStoryBranchScopeId(charUuid, branch.id)),
+              );
+            serverKvCache.forEach((_, key) => {
+              const scoped = getScopedStorageInfo(getStorageLogicalKey(key));
+              if (scoped && getStoryBranchOwnerId(scoped.id) === charUuid) {
+                scopeIds.add(scoped.id);
+              }
+            });
+          }
+
+          // 收集所有分支聊天中引用过的图片（内存当前角色 + 各分支服务器数据）
+          const imageUrls = new Set();
+          (chatHistory.value || []).forEach((msg) => {
+            Object.values(msg?.images || {}).forEach(
+              (u) => u && imageUrls.add(u),
+            );
+          });
+          await Promise.all(
+            [...scopeIds].map(async (scopeId) => {
+              try {
+                const saved = await getScopedStoredValue("chat", scopeId);
+                (Array.isArray(saved) ? saved : []).forEach((msg) => {
+                  Object.values(msg?.images || {}).forEach(
+                    (u) => u && imageUrls.add(u),
+                  );
+                });
+              } catch (e) {
+                console.warn("读取分支聊天失败:", scopeId, e);
+              }
+            }),
+          );
+
+          // 清空内存状态（含剧情分支路线图，回到主线）
           chatHistory.value = [];
           if (currentCharacter.value && currentCharacter.value.first_mes) {
             chatHistory.value.push({
@@ -7269,9 +7313,46 @@ ${content}
           }
           memories.value = [];
           classicMemories.value = [];
+          storyBranches.value = [];
+          activeStoryBranchId.value = STORY_BRANCH_MAIN_ID;
+          selectedStoryBranchId.value = STORY_BRANCH_MAIN_ID;
           resetUiTemplateRuntimeState();
-          saveData();
-          showToast("聊天记录、记忆和变量记录已清空", "success");
+
+          // 删除服务器数据：全部分支 scope 的 chat/memories/classic_memories + 分支元数据
+          const deleteTasks = [...scopeIds].flatMap((scopeId) =>
+            CHARACTER_SCOPED_STORAGE_NAMES.filter(
+              (name) => name !== "branches",
+            ).map((name) => deleteScopedStoredValue(name, scopeId)),
+          );
+          if (charUuid)
+            deleteTasks.push(deleteScopedStoredValue("branches", charUuid));
+          await Promise.all(deleteTasks);
+
+          // 清理 emptyTurns 与 UI 模板运行时残留
+          [...scopeIds].forEach((scopeId) => {
+            delete memorySettings.emptyTurns?.[getMemoryEmptyTurnsKey(scopeId)];
+          });
+          ensureGlobalUiTemplates().forEach((template) => {
+            if (!template.runtimeByCharacter) return;
+            [...scopeIds].forEach((scopeId) => {
+              delete template.runtimeByCharacter[scopeId];
+            });
+          });
+
+          // 删除引用过的图片文件（逐个容错，失败仅告警不中断清理）
+          await Promise.all(
+            [...imageUrls].map(async (url) => {
+              try {
+                await RPHubServerApi.imageDelete(url);
+              } catch (e) {
+                console.warn("聊天图片删除失败:", url, e);
+              }
+            }),
+          );
+
+          // 保存其余全局状态（重新写入空的主线聊天与记忆）
+          await saveData();
+          showToast("聊天记录、记忆、变量记录与聊天图片已清空", "success");
         },
       );
     };
@@ -7321,15 +7402,45 @@ ${content}
     };
 
     const copyMessage = (content) => {
-      navigator.clipboard
-        .writeText(stripUiTemplateUpdateBlock(content))
-        .then(() => {
-          showToast("已复制到剪贴板", "success");
-        })
-        .catch((err) => {
+      const text = stripUiTemplateUpdateBlock(content);
+      // navigator.clipboard 需安全上下文（HTTPS/localhost）；局域网 http://IP 访问时
+      // 手机端不可用，降级到 execCommand('copy')（textarea+select 方案）
+      const copyViaExecCommand = () => {
+        try {
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          ta.setAttribute("readonly", "");
+          ta.style.position = "fixed";
+          ta.style.top = "-9999px";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.select();
+          ta.setSelectionRange(0, text.length); // iOS 兼容
+          const ok = document.execCommand("copy");
+          document.body.removeChild(ta);
+          if (ok) {
+            showToast("已复制到剪贴板", "success");
+          } else {
+            showToast("复制失败", "error");
+          }
+        } catch (err) {
           console.error("Copy failed:", err);
           showToast("复制失败", "error");
-        });
+        }
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard
+          .writeText(text)
+          .then(() => {
+            showToast("已复制到剪贴板", "success");
+          })
+          .catch((err) => {
+            console.error("Clipboard API failed, fallback:", err);
+            copyViaExecCommand();
+          });
+      } else {
+        copyViaExecCommand();
+      }
     };
 
     const editMessage = (index) => {

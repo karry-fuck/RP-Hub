@@ -236,6 +236,51 @@ def handle_images_post(payload):
     return 200, {"url": "/images/%s/%s" % (category, filename)}
 
 
+def handle_image_delete(path):
+    """
+    DELETE /api/images/<category>/<file> 逻辑。
+    路径校验防穿越（与 _serve_image 一致），删除磁盘文件并同步清理 images 表记录。
+    返回 (status, json_obj)。
+    """
+    rest = path[len("/api/images/"):]
+    parts = rest.split("/")
+    if len(parts) != 2:
+        return 400, {"error": "路径格式应为 /api/images/<category>/<file>"}
+    category, filename = (
+        urllib.parse.unquote(parts[0]),
+        urllib.parse.unquote(parts[1]),
+    )
+    if category not in CATEGORIES:
+        return 400, {"error": "category 必须是 %s" % "/".join(CATEGORIES)}
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", filename):
+        return 400, {"error": "非法文件名"}
+    target_dir = os.path.realpath(os.path.join(IMAGES_DIR, category))
+    filepath = os.path.realpath(os.path.join(target_dir, filename))
+    if not filepath.startswith(target_dir + os.sep):
+        return 400, {"error": "非法路径"}
+    if not os.path.isfile(filepath):
+        return 404, {"error": "图片不存在"}
+    try:
+        os.remove(filepath)
+    except OSError as e:
+        return 500, {"error": "删除失败: %s" % e}
+    # 同步清理 images 表记录（幂等，为图库清理服务预留）
+    try:
+        with _db_lock:
+            conn = get_conn()
+            try:
+                conn.execute(
+                    "DELETE FROM images WHERE filename=? AND category=?",
+                    (filename, category),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception:
+        pass
+    return 200, {"ok": True, "url": "/images/%s/%s" % (category, filename)}
+
+
 # ---- HTTP Handler ----
 class RPHandler(SimpleHTTPRequestHandler):
     server_version = "RP-Hub/1.0"
@@ -446,6 +491,10 @@ class RPHandler(SimpleHTTPRequestHandler):
                 return
             kv_delete(key)
             self._send_json(200, {"ok": True})
+            return
+        if path.startswith("/api/images/"):
+            status, result = handle_image_delete(path)
+            self._send_json(status, result)
             return
         self.send_error(405, "Method Not Allowed")
 
