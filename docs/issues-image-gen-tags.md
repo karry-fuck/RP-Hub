@@ -95,6 +95,7 @@ buildFinalGenPrompt({
 - [ ] 回退:选无 LoadImage 工作流做图生图 → 回退文生图提示 + 请求体 prompt 含角色 tag
 - [ ] 负面提示词、denoise/steps/cfg 等工作流参数与改动前一致
 - [ ] 旧消息持久化反查(image### 占位 taskid)不受影响
+- [ ] 边界(规格审查记录):对话内 `image###` 内容为空时走 seam 直出兜底 = `角色tag, portrait, best quality`,**丢弃默认 tag**(IS-1 兜底规则的自然结果;旧行为为 `角色tag+默认tag`)
 
 ### Blocked by
 

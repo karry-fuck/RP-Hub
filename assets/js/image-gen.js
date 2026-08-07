@@ -65,13 +65,14 @@
   /**
    * 构建占位 HTML（纯函数，无副作用，不注册任务）
    *
-   * @param {string} prompt   AI 输出的原始提示词（image###...### 的内容）
+   * @param {string} prompt   已组装的最终正向 prompt（seam 产出 finalPrompt，含角色 tag/默认 tag）
    * @param {number} offset   replace 回调的第 3 参，保证同文本同 taskid、同消息多图不同 id
    * @param {object} ctx      读 settings 组装：{ provider, defaultTags, size, steps, cfg, denoise, negative,
-   *                           taskid, msgId, storedSrc }
+   *                           taskid, msgId, storedSrc, refImage, genMode, characterTag }
    *                          taskid/msgId 由 app.js 注入（图片持久化反查消息用）；
    *                          storedSrc 存在时输出"已完成"形态（data-resolved="1" + 真实 <img>），
-   *                          scanPendingImageGen 会跳过，不再重新生成。
+   *                          scanPendingImageGen 会跳过，不再重新生成；
+   *                          characterTag 供 ComfyUI 回退文生图时临时补回角色 tag。
    * @returns {string}        占位 HTML 字符串（含 data-taskid/data-prompt 等）
    */
   const buildTaskId = (prompt, offset) =>
@@ -86,6 +87,7 @@
     const storedSrc = ctx.storedSrc || "";
     const refImage = ctx.refImage || ""; // 图生图参考图服务器 URL；空则文生图
     const genMode = ctx.genMode || "tag"; // ref=图生图 / tag=文生图
+    const characterTag = ctx.characterTag || ""; // 回退文生图时临时补回角色 tag
 
     const attrs = [
       `class="rphub-gen-wrap ${storedSrc ? "rphub-gen-done" : "rphub-gen-pending"}"`,
@@ -98,6 +100,7 @@
       `data-seed="${seed}"`,
       `data-ref-image="${escapeHtmlAttr(refImage)}"`,
       `data-gen-mode="${escapeHtmlAttr(genMode)}"`,
+      `data-character-tag="${escapeHtmlAttr(characterTag)}"`,
     ];
     if (storedSrc) attrs.push('data-resolved="1"');
     const attrsStr = attrs.join(" ");
@@ -122,7 +125,7 @@
   // ---- IS-1: 最终正向提示词决策纯函数（公式收敛，seam）----
   // 收敛文生图/图生图/直出图/外观剥离的全部「最终 prompt 决策」规则为单一纯函数。
   // 不依赖 Vue 实例与全局状态（settings/characterTagData 等全由调用方解析后显式传入），
-  // 浏览器控制台可独立断言。模式判定与 app.js determineImageGenMode 完全一致：
+  // 浏览器控制台可独立断言。模式判定三层（原 app.js determineImageGenMode 逻辑已内联于此）：
   //   1) provider≠comfy → 一律 tag（sta1n/OpenAI 无图输入能力）
   //   2) imageGenMode：ref→有参考图?ref:tag / tag→强制 tag
   //   3) auto→有参考图?ref:tag
@@ -141,7 +144,7 @@
     const imageTag = String(character.imageTag || "").trim();
     const tagAssist = String(character.tagAssist || "").trim();
     const refImage = character.refImage || "";
-    // 1. 模式判定（与 app.js determineImageGenMode 一致）
+    // 1. 模式判定（三层，原 determineImageGenMode 逻辑内联）
     let mode = "tag";
     if (provider === "comfy") {
       const pref = character.imageGenMode || "auto";
@@ -176,6 +179,7 @@
       mode,
       finalPrompt,
       refImage: mode === "ref" ? refImage : "",
+      characterTag, // 供占位/直出图携带、ComfyUI 回退文生图补 tag 用（消除调用侧重复拼接）
     };
   };
 
@@ -647,6 +651,12 @@
         workflow =
           (workflows && workflows[settings.comfyWorkflow]) ||
           DEFAULT_COMFY_WORKFLOW;
+        // 回退后已是文生图，按文生图公式补回角色 tag（PRD「回退补 tag」）
+        if (task.characterTag) {
+          task.prompt = [task.characterTag, task.prompt]
+            .filter(Boolean)
+            .join(",");
+        }
         // 通知调用方提示用户（PRD：无 LoadImage 回退文生图并提示）
         onFallback?.(wfKey);
       }

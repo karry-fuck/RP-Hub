@@ -4058,31 +4058,26 @@ image###描述###
     const getTagAssistFor = (enTag) =>
       characterTagData.value?.tagAssist?.[enTag] || "";
 
-    // ---- 角色生图模式判定 + 角色 tag 注入（对话内与角色卡直出图共用，PRD「模式判定」）----
-    // 三层优先级：
-    //   1) imageGenMode 显式：ref=强制图生图（无参考图回退文生图）/ tag=强制文生图
-    //   2) auto：有参考图 且 provider=ComfyUI → 图生图，否则文生图
-    //   3) provider ≠ ComfyUI（sta1n/OpenAI 无图输入能力）→ 一律文生图
-    const determineImageGenMode = (char) => {
-      const provider = settings.imageProvider || "sta1n";
-      if (provider !== "comfy") return "tag";
-      const mode = char?.imageGenMode || "auto";
-      if (mode === "ref") return char?.refImage ? "ref" : "tag";
-      if (mode === "tag") return "tag";
-      return char?.refImage ? "ref" : "tag";
-    };
-    // 角色 tag + tag_assist 追加词 → 拼进 prompt 的角色标识串
-    const buildRoleTagPrompt = (char) => {
+    // 构造 buildFinalGenPrompt seam 输入（对话内占位与直出图共用）。
+    // provider 映射 settings.imageProvider → seam settings.provider；
+    // tagAssist 在调用侧解析（getTagAssistFor），seam 不自解析。
+    // stripAppearance 为 IS-5 图生图外观词剥离开关，此片保持 false。
+    const buildSeamArgs = (char, aiPrompt) => {
       const en = String(char?.imageTag || "").trim();
-      if (!en) return "";
-      const assist = getTagAssistFor(en);
-      return assist ? `${en}, ${assist}` : en;
-    };
-    // 组装角色生图上下文：{ mode: "ref"|"tag", refImage, characterTag }
-    const buildCharacterGenContext = (char) => {
-      const mode = determineImageGenMode(char);
-      const refImage = mode === "ref" && char?.refImage ? char.refImage : "";
-      return { mode, refImage, characterTag: buildRoleTagPrompt(char) };
+      return {
+        character: {
+          imageTag: en,
+          tagAssist: en ? getTagAssistFor(en) : "",
+          refImage: char?.refImage || "",
+          imageGenMode: char?.imageGenMode || "auto",
+        },
+        settings: {
+          provider: settings.imageProvider || "sta1n",
+          imageGenDefaultTags: settings.imageGenDefaultTags || "",
+        },
+        aiPrompt,
+        stripAppearance: false, // IS-5 启用外观剥离
+      };
     };
 
     // 对话内 image### 提示词最大长度（超长自动截断，PRD 触发加固）
@@ -4108,23 +4103,20 @@ image###描述###
       );
       const msgId = msgCtx?.msgId || "";
       const storedSrc = msgCtx?.images?.[taskid] || "";
-      const genCtx = buildCharacterGenContext(currentCharacter.value);
-      // 顺序：角色 tag → 全局默认 tags（artist/style）→ 消息提示词
-      const enrichedPrompt = [
-        genCtx.characterTag,
-        settings.imageGenDefaultTags || "",
-        truncated,
-      ]
-        .filter(Boolean)
-        .join(",");
-      return window.RPHubImageGen.buildPlaceholderHtml(enrichedPrompt, offset, {
+      // IS-4:统一走 buildFinalGenPrompt seam（公式收敛，AI 在前）
+      const char = currentCharacter.value || {};
+      const gen = window.RPHubImageGen.buildFinalGenPrompt(
+        buildSeamArgs(char, truncated),
+      );
+      return window.RPHubImageGen.buildPlaceholderHtml(gen.finalPrompt, offset, {
         provider,
         size,
         taskid: msgId ? taskid : undefined,
         msgId,
         storedSrc,
-        refImage: genCtx.refImage,
-        genMode: genCtx.mode,
+        refImage: gen.refImage,
+        genMode: gen.mode,
+        characterTag: gen.characterTag, // 回退文生图补 tag 用
       });
     };
 
@@ -4136,6 +4128,7 @@ image###描述###
       seed: Number(wrap.dataset.seed) || 0,
       refImage: wrap.dataset.refImage || "", // 图生图参考图服务器 URL；空则文生图
       genMode: wrap.dataset.genMode || "tag", // ref=图生图 / tag=文生图
+      characterTag: wrap.dataset.characterTag || "", // 回退文生图时补回角色 tag
     });
 
     const applyImageGenResultToNode = (wrap, src, errorMsg) => {
@@ -4241,9 +4234,12 @@ image###描述###
     const characterGenResult = ref("");
     const characterGenError = ref("");
     const generateCharacterImage = async (char = editingCharacter.data) => {
-      const genCtx = buildCharacterGenContext(char);
       const provider = settings.imageProvider || "sta1n";
-      if (!genCtx.refImage && !genCtx.characterTag) {
+      // IS-4:统一走 buildFinalGenPrompt seam（aiPrompt 缺省 → 直出图兜底）
+      const gen = window.RPHubImageGen.buildFinalGenPrompt(
+        buildSeamArgs(char, ""),
+      );
+      if (!gen.refImage && !gen.characterTag) {
         showToast("请先上传参考图或设置角色 tag", "info");
         return;
       }
@@ -4263,12 +4259,13 @@ image###描述###
                 );
         const task = {
           taskid: `char_${char.uuid || "new"}_${Date.now()}`,
-          prompt: genCtx.characterTag || "portrait, best quality",
+          prompt: gen.finalPrompt,
           provider,
           size,
           seed: Math.floor(Math.random() * 0x7fffffff),
-          refImage: genCtx.refImage, // 图生图参考图；无则文生图
-          genMode: genCtx.mode,
+          refImage: gen.refImage, // 图生图参考图；无则文生图
+          genMode: gen.mode,
+          characterTag: gen.characterTag, // 回退文生图时补回角色 tag
         };
         let src = await runImageGenGenerate(task);
         // 与对话内生成一致：落盘 images/generated/ 持久化（PRD「出图落盘」），
