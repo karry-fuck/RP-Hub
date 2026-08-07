@@ -119,6 +119,99 @@
     );
   };
 
+  // ---- IS-1: 最终正向提示词决策纯函数（公式收敛，seam）----
+  // 收敛文生图/图生图/直出图/外观剥离的全部「最终 prompt 决策」规则为单一纯函数。
+  // 不依赖 Vue 实例与全局状态（settings/characterTagData 等全由调用方解析后显式传入），
+  // 浏览器控制台可独立断言。模式判定与 app.js determineImageGenMode 完全一致：
+  //   1) provider≠comfy → 一律 tag（sta1n/OpenAI 无图输入能力）
+  //   2) imageGenMode：ref→有参考图?ref:tag / tag→强制 tag
+  //   3) auto→有参考图?ref:tag
+  // 公式（PRD「最终正向提示词」，顺序经评审确认：AI 在前）：
+  //   文生图 = 角色tag(含tag_assist) + aiPrompt + 默认提示词tag，角色 tag 在最前
+  //   图生图 = aiPrompt + 默认提示词tag（无角色 tag），refImage 返回角色参考图
+  //   直出图兜底 = aiPrompt 缺省时 ref→"portrait, best quality" / tag→"角色tag, portrait, best quality"
+  //   外观剥离 = stripAppearance=true 且 ref 模式时，对 aiPrompt 做外观词级剥离（IS-5 启用）
+  const buildFinalGenPrompt = ({
+    character = {},
+    settings = {},
+    aiPrompt = "",
+    stripAppearance = false,
+  }) => {
+    const provider = String(settings.provider || "sta1n");
+    const imageTag = String(character.imageTag || "").trim();
+    const tagAssist = String(character.tagAssist || "").trim();
+    const refImage = character.refImage || "";
+    // 1. 模式判定（与 app.js determineImageGenMode 一致）
+    let mode = "tag";
+    if (provider === "comfy") {
+      const pref = character.imageGenMode || "auto";
+      if (pref === "ref") mode = refImage ? "ref" : "tag";
+      else if (pref === "tag") mode = "tag";
+      else mode = refImage ? "ref" : "tag";
+    }
+    // 2. 角色 tag 串（imageTag + tag_assist 追加词）
+    const characterTag = imageTag
+      ? tagAssist
+        ? `${imageTag}, ${tagAssist}`
+        : imageTag
+      : "";
+    const defaultTags = String(settings.imageGenDefaultTags || "").trim();
+    // 3. aiPrompt 段（可选外观剥离，仅图生图生效）
+    let content = String(aiPrompt || "").trim();
+    if (stripAppearance && mode === "ref" && content) {
+      content = stripAppearanceTags(content);
+    }
+    // 4. 组装：AI 内容在前（评审确认顺序）；图生图去角色 tag；直出图兜底不含默认 tags
+    let finalPrompt;
+    if (mode === "ref") {
+      finalPrompt = content
+        ? [content, defaultTags].filter(Boolean).join(",")
+        : "portrait, best quality";
+    } else {
+      finalPrompt = content
+        ? [characterTag, content, defaultTags].filter(Boolean).join(",")
+        : [characterTag, "portrait, best quality"].filter(Boolean).join(",");
+    }
+    return {
+      mode,
+      finalPrompt,
+      refImage: mode === "ref" ? refImage : "",
+    };
+  };
+
+  // 外观词表（Danbooru 常见发色/发型/瞳色/服装/体型/种族/年龄词）。
+  // IS-1 内置基础版；IS-5 扩充词表 + 预留用户自定义扩展入口。
+  const APPEARANCE_TAG_WORDS = [
+    // 发型 / 发饰
+    "hair", "ahoge", "bangs", "braid", "braids", "ponytail", "twintails",
+    "sidelocks", "hairband", "hairclip", "hairpins", "hairbun",
+    // 眼睛 / 面部
+    "eyes", "eyelashes", "eyebrows", "iris", "pupils", "eyepatch", "blindfold",
+    // 服装
+    "dress", "skirt", "blouse", "shirt", "jacket", "coat", "pants",
+    "shorts", "stockings", "thighhighs", "socks", "shoes", "boots",
+    "hat", "cap", "ribbon", "necktie", "gloves", "sleeves", "collar",
+    // 体型 / 种族 / 年龄
+    "body", "figure", "muscles", "bust", "breasts", "chest", "waist",
+    "ears", "tail", "wings", "horns", "fangs", "elf",
+    "loli", "shota",
+  ];
+  // 整词匹配（空格/下划线边界），避免误伤场景词（如 bodyguard 不命中 body）
+  const hasAppearanceWord = (tag) => {
+    const t = String(tag || "").toLowerCase();
+    return APPEARANCE_TAG_WORDS.some((w) => {
+      const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`(^|[\\s_])${escaped}([\\s_]|$)`, "i").test(t);
+    });
+  };
+  // 按逗号切分，丢弃命中外观词表的 tag，保留动作/镜头/场景/环境/风格等
+  const stripAppearanceTags = (prompt) =>
+    String(prompt || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s && !hasAppearanceWord(s))
+      .join(",");
+
   // ---- ComfyUI workflow ----
 
   /**
@@ -1252,6 +1345,8 @@
     TRANSPARENT_GIF,
     buildTaskId,
     buildPlaceholderHtml,
+    buildFinalGenPrompt,
+    stripAppearanceTags,
     fillComfyWorkflow,
     parseResolution,
     normalizeOpenAISize,
