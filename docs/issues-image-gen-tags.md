@@ -48,7 +48,7 @@ buildFinalGenPrompt({
 
 ### Acceptance criteria
 
-- [ ] 常量同步可用:角色卡/世界书构建时无需等待 fetch 即可读到 4 类 view_tags + poses
+- [ ] 常量同步可用:自动生图世界书构建时无需等待 fetch 即可读到 4 类 view_tags + poses(仅主应用 app.js 消费;角色卡工坊 character/index.html 不涉及)
 - [ ] 自动生图世界书(sta1n/comfy)末尾含分类分组的 tag 池,含「按需挑选,勿全加」说明
 - [ ] openai provider 世界书为自然语言版,不含 view_tags/poses 段落
 - [ ] 世界书重建(enforceSpecialRules 触发)后 tag 池仍存在且不重复

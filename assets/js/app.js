@@ -13355,6 +13355,124 @@ ${content}
       );
     };
 
+    // ---- IS-2: 可选 tag 池（view_tags + poses）----
+    // 来源 data/view_tags.json（angle/camera/background/style 4 类）+ data/characters.json poses。
+    // 硬编码为 JS 常量：世界书构建是同步过程，不能依赖 characters.json 的异步 fetch；
+    // 数据基本固定、体积约 2KB。仅 tag 模式（sta1n/comfy）注入，openai 自然语言版不注入。
+    // 注意：下方两池与 view_tags.json / wildcardPoses.txt 逐项镜像，改数据文件时需同步此处（无构建校验）。
+    const VIEW_TAG_POOL = {
+      angle: [
+        "from above",
+        "from behind",
+        "from below",
+        "from side",
+        "ass focus",
+        "back focus",
+        "breast focus",
+        "chest focus",
+        "face focus",
+        "foot focus",
+        "hand focus",
+        "hip focus",
+        "thigh focus",
+        "magazine cover",
+        "official art",
+        "pov",
+        "pov crotch",
+        "pov hands",
+        "profile",
+        "straight-on",
+        "looking at viewer, from side, head tilt, leaning back",
+      ],
+      camera: [
+        "backlight",
+        "cinematic angle",
+        "dramatic angle",
+        "dutch angle",
+        "dynamic angle",
+        "intense angle",
+        "foreshortening",
+        "multiple views",
+        "perspective",
+        "fisheye",
+        "wide shot",
+        "motion lines, motion blur",
+      ],
+      background: [
+        "depth of field",
+        "blurry background, depth of field",
+        "blurry foreground, blurry background, depth of field",
+        "simple background",
+        "white background, simple background",
+        "photo background",
+        "abstract background",
+        "gradient background",
+        "gradient background, rounded corners, outside border",
+        "rounded corners, outside border",
+        "screentones",
+      ],
+      style: [
+        "1980s (style)",
+        "1990s (style)",
+        "2000s (style)",
+        "2010s (style)",
+        "aged down",
+        "aged up",
+        "anime coloring, anime screenshot",
+        "chibi",
+        "petite",
+        "colorful",
+        "cyberpunk",
+        "cyborg",
+        "fantasy",
+        "genderswap",
+        "high saturation",
+        "Ink wash painting",
+        "flat colors",
+        "lineart",
+        "no lineart",
+        "oil painting (medium)",
+        "pixel art, pixelated",
+        "realistic, photorealistic",
+        "science fiction",
+        "steampunk",
+        "tachie",
+        "tarot",
+        "ukiyo-e",
+      ],
+    };
+    const POSE_TAG_POOL = [
+      "standing",
+      "sitting",
+      "on one knee",
+      "on back",
+      "on side",
+      "on stomach",
+      "squatting",
+      "pointing",
+    ];
+    // 分类分组拼接为世界书「可选 tag 池」段落，注明按需挑选勿全加
+    const buildViewTagPoolSection = () => {
+      const lines = [];
+      lines.push(
+        "\n<可选_Tag_池（构图/镜头/背景/风格/姿势）>",
+        "以下为适配本工作流的通用画面 Tag，编 prompt 时按场景按需挑选 1-3 个匹配词，勿全部堆加：",
+      );
+      const catNames = {
+        angle: "[角度]",
+        camera: "[镜头]",
+        background: "[背景]",
+        style: "[风格]",
+      };
+      for (const [cat, names] of Object.entries(catNames)) {
+        const tags = VIEW_TAG_POOL[cat] || [];
+        if (tags.length) lines.push(`${names} ${tags.join(", ")}`);
+      }
+      lines.push(`[姿势] ${POSE_TAG_POOL.join(", ")}`);
+      lines.push("</可选_Tag_池>");
+      return lines.join("\n");
+    };
+
     const enforceSpecialRules = () => {
       const imageProvider = settings.imageProvider || "sta1n";
 
@@ -13474,7 +13592,7 @@ image###生成的提示词###
 </生成格式>
 </Tag_智能调整>
 
-特别提示：出现user或主角参与的情况(如被口、手交），禁止出现主角的人物形象(脸部，头部）！必须使用第一视角(POV）相关提示词！且要作为Character  Prompt添加，禁止出现用户/主角名字(包括英文和拼音），中文和{{user}}是明令禁止的；同人角色本人的官方角色名仍按上方规则放在最前面。一定要保持同一人物在上下文中的形象一致性，不要丢失人物特性(如有异色瞳特征人物），涉及人物常见特征(如发色，瞳孔颜色等）的提示词请增加权重\n</auto_image_gen>`,
+特别提示：出现user或主角参与的情况(如被口、手交），禁止出现主角的人物形象(脸部，头部）！必须使用第一视角(POV）相关提示词！且要作为Character  Prompt添加，禁止出现用户/主角名字(包括英文和拼音），中文和{{user}}是明令禁止的；同人角色本人的官方角色名仍按上方规则放在最前面。一定要保持同一人物在上下文中的形象一致性，不要丢失人物特性(如有异色瞳特征人物），涉及人物常见特征(如发色，瞳孔颜色等）的提示词请增加权重${buildViewTagPoolSection()}\n</auto_image_gen>`,
         constant: true,
         enabled: false, // Default closed
         scope: "global",
