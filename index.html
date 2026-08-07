@@ -4454,6 +4454,20 @@
                           placeholder="留空使用默认负面词"
                         ></textarea>
                       </div>
+
+                      <!-- 外观过滤词（图生图，IS-5） -->
+                      <div class="generation-setting-card">
+                        <label
+                          class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2"
+                          >外观过滤词（图生图）</label
+                        >
+                        <input
+                          v-model="settings.imageGenAppearanceExtraWords"
+                          type="text"
+                          class="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm"
+                          placeholder="逗号分隔，如：white dress, ponytail（图生图时从 AI 提示词剥离外观词）"
+                        />
+                      </div>
                     </div>
                   </div>
                 </div>

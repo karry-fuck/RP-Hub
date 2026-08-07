@@ -125,7 +125,7 @@
   // ---- IS-1: 最终正向提示词决策纯函数（公式收敛，seam）----
   // 收敛文生图/图生图/直出图/外观剥离的全部「最终 prompt 决策」规则为单一纯函数。
   // 不依赖 Vue 实例与全局状态（settings/characterTagData 等全由调用方解析后显式传入），
-  // 浏览器控制台可独立断言。模式判定三层（原 app.js determineImageGenMode 逻辑已内联于此）：
+  // 浏览器控制台可独立断言。模式判定三层：
   //   1) provider≠comfy → 一律 tag（sta1n/OpenAI 无图输入能力）
   //   2) imageGenMode：ref→有参考图?ref:tag / tag→强制 tag
   //   3) auto→有参考图?ref:tag
@@ -134,24 +134,35 @@
   //   图生图 = aiPrompt + 默认提示词tag（无角色 tag），refImage 返回角色参考图
   //   直出图兜底 = aiPrompt 缺省时 ref→"portrait, best quality" / tag→"角色tag, portrait, best quality"
   //   外观剥离 = stripAppearance=true 且 ref 模式时，对 aiPrompt 做外观词级剥离（IS-5 启用）
+  // determineImageGenMode 为模式判定单点来源：buildFinalGenPrompt 与世界书分支共用，保证公式与指令一致。
+  const determineImageGenMode = ({
+    provider,
+    imageGenMode = "auto",
+    refImage,
+  }) => {
+    if (provider !== "comfy") return "tag";
+    const pref = imageGenMode || "auto";
+    if (pref === "ref") return refImage ? "ref" : "tag";
+    if (pref === "tag") return "tag";
+    return refImage ? "ref" : "tag";
+  };
   const buildFinalGenPrompt = ({
     character = {},
     settings = {},
     aiPrompt = "",
     stripAppearance = false,
+    appearanceExtraWords = "",
   }) => {
     const provider = String(settings.provider || "sta1n");
     const imageTag = String(character.imageTag || "").trim();
     const tagAssist = String(character.tagAssist || "").trim();
     const refImage = character.refImage || "";
-    // 1. 模式判定（三层，原 determineImageGenMode 逻辑内联）
-    let mode = "tag";
-    if (provider === "comfy") {
-      const pref = character.imageGenMode || "auto";
-      if (pref === "ref") mode = refImage ? "ref" : "tag";
-      else if (pref === "tag") mode = "tag";
-      else mode = refImage ? "ref" : "tag";
-    }
+    // 1. 模式判定（determineImageGenMode 单点来源，世界书分支复用）
+    const mode = determineImageGenMode({
+      provider,
+      imageGenMode: character.imageGenMode || "auto",
+      refImage,
+    });
     // 2. 角色 tag 串（imageTag + tag_assist 追加词）
     const characterTag = imageTag
       ? tagAssist
@@ -162,7 +173,7 @@
     // 3. aiPrompt 段（可选外观剥离，仅图生图生效）
     let content = String(aiPrompt || "").trim();
     if (stripAppearance && mode === "ref" && content) {
-      content = stripAppearanceTags(content);
+      content = stripAppearanceTags(content, appearanceExtraWords);
     }
     // 4. 组装：AI 内容在前（评审确认顺序）；图生图去角色 tag；直出图兜底不含默认 tags
     let finalPrompt;
@@ -184,36 +195,64 @@
   };
 
   // 外观词表（Danbooru 常见发色/发型/瞳色/服装/体型/种族/年龄词）。
-  // IS-1 内置基础版；IS-5 扩充词表 + 预留用户自定义扩展入口。
+  // IS-1 内置基础版；IS-5 扩充常见发色/瞳色/服装/体型词 + 支持自定义扩展词。
   const APPEARANCE_TAG_WORDS = [
     // 发型 / 发饰
     "hair", "ahoge", "bangs", "braid", "braids", "ponytail", "twintails",
     "sidelocks", "hairband", "hairclip", "hairpins", "hairbun",
+    // 发色
+    "blonde", "brunette", "auburn", "redhead", "silver_hair",
     // 眼睛 / 面部
-    "eyes", "eyelashes", "eyebrows", "iris", "pupils", "eyepatch", "blindfold",
+    "eyes", "eyelashes", "eyebrows", "iris", "pupils", "heterochromia",
+    "eyepatch", "blindfold", "makeup", "lipstick",
     // 服装
     "dress", "skirt", "blouse", "shirt", "jacket", "coat", "pants",
     "shorts", "stockings", "thighhighs", "socks", "shoes", "boots",
     "hat", "cap", "ribbon", "necktie", "gloves", "sleeves", "collar",
+    "uniform", "sweater", "hoodie", "leggings", "kimono", "apron", "choker",
+    "pantyhose", "lingerie", "panties", "bra", "bikini", "swimsuit",
+    "maid", "nurse", "garter", "glasses",
     // 体型 / 种族 / 年龄
     "body", "figure", "muscles", "bust", "breasts", "chest", "waist",
+    "petite", "slim", "flat_chest", "curvaceous",
     "ears", "tail", "wings", "horns", "fangs", "elf",
     "loli", "shota",
   ];
   // 整词匹配（空格/下划线边界），避免误伤场景词（如 bodyguard 不命中 body）
-  const hasAppearanceWord = (tag) => {
+  // extraWords 为逗号分隔自定义扩展词（IS-5 设置入口）
+  const hasAppearanceWord = (tag, extraWords = "") => {
     const t = String(tag || "").toLowerCase();
-    return APPEARANCE_TAG_WORDS.some((w) => {
+    const words = APPEARANCE_TAG_WORDS.concat(
+      String(extraWords || "").split(","),
+    )
+      .map((w) => String(w).trim().toLowerCase())
+      .filter(Boolean);
+    return words.some((w) => {
       const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       return new RegExp(`(^|[\\s_])${escaped}([\\s_]|$)`, "i").test(t);
     });
   };
-  // 按逗号切分，丢弃命中外观词表的 tag，保留动作/镜头/场景/环境/风格等
-  const stripAppearanceTags = (prompt) =>
+  // 动作豁免标记：复合动作 tag（covering_chest_by_hand / skirt_pull / grabbing_hair 等）
+  // 含外观部位词（chest/skirt/hair）但描述的是动作而非外观，命中标记则保留不被剥离。
+  const APPEARANCE_ACTION_MARKERS = [
+    "by_hand", "by hand", "by_other", "by another", "by others",
+    "_pull", "_lift", "_grab", "_flip", "_cover", "_motion", "_wave", "_tug",
+    "_by_", "_on_own_", "_with_hand", "_with_one_hand",
+    "covering_", "grabbing_", "holding_", "touching_", "pulling_", "lifting_",
+    "wagging_", "poking_", "caressing_", "squeezing_", "pressing_",
+    "hands_on", "hand_on", "hand_in", "fingers_on", "hand_to", "hand_on_own",
+  ];
+  // tag 归一化（小写 + 空格/撇号转下划线），便于命中 Danbooru 下划线形式与自然语言形式
+  const isAppearanceAction = (tag) => {
+    const t = String(tag || "").toLowerCase().replace(/['\s]/g, "_");
+    return APPEARANCE_ACTION_MARKERS.some((m) => t.includes(m));
+  };
+  // 按逗号切分，丢弃命中外观词表（含自定义扩展词）的外观 tag，保留动作/镜头/场景/环境/风格等
+  const stripAppearanceTags = (prompt, extraWords = "") =>
     String(prompt || "")
       .split(",")
       .map((s) => s.trim())
-      .filter((s) => s && !hasAppearanceWord(s))
+      .filter((s) => s && (isAppearanceAction(s) || !hasAppearanceWord(s, extraWords)))
       .join(",");
 
   // ---- ComfyUI workflow ----
@@ -1357,6 +1396,7 @@
     buildPlaceholderHtml,
     buildFinalGenPrompt,
     stripAppearanceTags,
+    determineImageGenMode,
     fillComfyWorkflow,
     parseResolution,
     normalizeOpenAISize,

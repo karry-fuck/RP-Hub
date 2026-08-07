@@ -746,6 +746,7 @@ createApp({
       imageGenCfg: 6,
       imageGenDenoise: 1,
       imageGenNegativePrompt: "",
+      imageGenAppearanceExtraWords: "", // IS-5:图生图外观词剥离的自定义扩展词（逗号分隔）
       imageGenOpenaiBaseUrl: "",
       imageGenApiKey: "",
       imageGenBaseUrl: "",
@@ -4112,7 +4113,8 @@ image###描述###
     // 构造 buildFinalGenPrompt seam 输入（对话内占位与直出图共用）。
     // provider 映射 settings.imageProvider → seam settings.provider；
     // tagAssist 在调用侧解析（getTagAssistFor），seam 不自解析。
-    // stripAppearance 为 IS-5 图生图外观词剥离开关，此片保持 false。
+    // IS-5:stripAppearance=true 启用图生图外观词剥离（seam 内部仅 ref 模式生效）；
+    // appearanceExtraWords 为设置里的自定义扩展外观词（逗号分隔）。
     const buildSeamArgs = (char, aiPrompt) => {
       const en = String(char?.imageTag || "").trim();
       return {
@@ -4127,7 +4129,8 @@ image###描述###
           imageGenDefaultTags: settings.imageGenDefaultTags || "",
         },
         aiPrompt,
-        stripAppearance: false, // IS-5 启用外观剥离
+        stripAppearance: true,
+        appearanceExtraWords: settings.imageGenAppearanceExtraWords || "",
       };
     };
 
@@ -13622,6 +13625,63 @@ ${content}
       // 添加新的到首位
       regexScripts.value.unshift(imageGenRegexContent);
 
+      // IS-5:图生图外观保护——世界书按当前角色模式分支。
+      // 判定与 buildFinalGenPrompt 的 mode 判定一致（determineImageGenMode 单点来源）：
+      // 角色有参考图且 provider=comfy 且未强制 tag → 图生图模式。
+      const isImg2imgMode =
+        window.RPHubImageGen.determineImageGenMode({
+          provider: imageProvider,
+          imageGenMode: currentCharacter.value?.imageGenMode || "auto",
+          refImage: currentCharacter.value?.refImage || "",
+        }) === "ref";
+      // 图生图模式：外观以参考图为准、禁外观/服装 tag；文生图模式维持外观一致性指令。
+      const genNote = isImg2imgMode
+        ? "注意:始终使用逗号分隔条目."
+        : "注意:始终使用逗号分隔条目.另外请保证同一角色的特征，如发色，瞳孔颜色，体态，外貌的一致性.";
+      const nsfwRule = isImg2imgMode
+        ? "注意：如为nsfw场景，生成的提示词必须带上 nsfw 标签；本模式角色外观与身份由参考图承担，不要在提示词中写同人角色名或角色卡设定的外貌、服装。"
+        : "注意：如为nsfw场景，生成的提示词必须带上 nsfw 标签；如果是同人/已有作品角色，角色名仍必须放在最前面，nsfw 紧跟其后。";
+      const genGuide = isImg2imgMode
+        ? `第一重要的在于人物的动作与姿态,例如：standing,sitting,kneeling,running,fighting,cooking,表情动作：smile,crying,tearing_clothes,disgust,angry,kubrick_stare,
+第二在于人物姿势：例如基础的站姿：standing,on back,on stomach,kneeling,做事情：bathing,cooking,fighting,showering,sleeping,spitting,walking,toilet_use,性爱姿势：grinding,fingering,licking_penis,
+第三在于动作细节:例如hands_on_own_chest,arms_behind_back,penis_grab,pulled_by_self,skirt_pull,clothes_lift,covering_chest_by_hand,finger_to_mouth,hands_on_lap,
+第四在于环境交互：例如：grinding,fingering,licking_penis,spread legs,wariza,sitting_in_tree,lotus_position,sitting_on_rock,sitting_on_stairs,folded,cameltoe,
+第五在于镜头描写，从XX往XX看，上半身还是下半身，例如从下往上的下半身，从上往下的上半身.lower_body,between_legs,between_breasts,pantyshot,looking_at_viewer,
+第六在于人物此时的位置，例如: diningroom, gym, bedroom, indoors, home, beach
+第七在于当前时间,morning, noon ，night, emphasize the lighting situation..`
+        : `第一重要的在于人物的特点,例如：white hair,性别：1girl,1boy,特色：mesugaki,ojousama,服装特色：china_dress,gothic,glasses,表情动作：smile,crying,tearing_clothes,disgust,angry,kubrick_stare,
+第二在于人物姿势：例如基础的站姿：standing,on back,on stomach,kneeling,做事情：bathing,cooking,fighting,showering,sleeping,spitting,walking,toilet_use,性爱姿势：grinding,fingering,licking_penis,
+第三在于动作细节:例如hands_on_own_chest,arms_behind_back,penis_grab,pulled_by_self,skirt_pull,clothes_lift,covering_chest_by_hand,finger_to_mouth,hands_on_lap,
+第四在于环境交互：例如：grinding,fingering,licking_penis,spread legs,wariza,sitting_in_tree,lotus_position,sitting_on_rock,sitting_on_stairs,folded,cameltoe,
+第五在于衣物细节:例如XX半脱，露出XX
+第六在于镜头描写，从XX往XX看，上半身还是下半身，例如从下往上的下半身，从上往下的上半身.lower_body,between_legs,between_breasts,pantyshot,looking_at_viewer,
+第七在于人物此时的位置，例如: diningroom, gym, bedroom, indoors, home, beach
+第八在于当前时间,morning, noon ，night, emphasize the lighting situation..`;
+      const charIdentity = isImg2imgMode
+        ? " - 本模式角色外观与身份以参考图为准，不写同人角色名或原创角色名"
+        : " - 同人角色：提示词第一项必须是英文全名\\\\(作品名\\\\)或常用角色Tag（下划线_替换成空格，/转义为\\\\），再接外貌、服装、动作等Tag\n - 原创角色：名字替换为\"original\"(也就是人物卡角色)";
+      const charFeatures = isImg2imgMode
+        ? " - 只描述动作、姿态、表情、镜头、场景、环境、光影等非外观元素；严禁发型、发色、瞳色、服装、体型、种族、年龄等外观 tag"
+        : " - 基础特征：发型、发色、瞳色、罩杯\n - 专属特征：年龄、职业、性格、皮肤、种族等";
+      const consistencyRule = isImg2imgMode
+        ? ` ### 图生图指令 (极其重要):
+当前角色配有参考图，角色外观（发型/发色/瞳色/服装/体型/种族/年龄等）一律以参考图为准，image### 中严禁描述任何外观或服装特征，尤其不得引用角色卡或世界书设定中的外貌、着装。
+只允许描述：动作、姿态、表情、镜头角度、构图、场景、环境、光影、时间、风格、道具等非外观元素。
+涉及 NSFW/POV 的既有规则保留。`
+        : ` ### 核心一致性规范 (极其重要):
+1. **上下文一致性**：必须精准提取并保留角色当前的外貌，着装状态（如衣服是否破损、脱下）、环境光影、道具位置以及相对姿势。一旦在上文改变了状态，后续生图Tag必须绝对保持一致！
+2. **同人角色/固定外观一致性**：对于特定世界观或同人角色，提示词最前面必须放官方英文名或常用角色Tag，并带上极其准确的专属特征Tag组合。对常驻特征（如特定发型、异色瞳、专属装饰物等）加上最高权重 {{{Tag}}}，避免生成外形崩坏和不一致。`;
+      const specialNote = isImg2imgMode
+        ? "特别提示：出现user或主角参与的情况(如被口、手交），禁止出现主角的人物形象(脸部，头部）！必须使用第一视角(POV）相关提示词！且要作为Character  Prompt添加，禁止出现用户/主角名字(包括英文和拼音），中文和{{user}}是明令禁止的。"
+        : "特别提示：出现user或主角参与的情况(如被口、手交），禁止出现主角的人物形象(脸部，头部）！必须使用第一视角(POV）相关提示词！且要作为Character  Prompt添加，禁止出现用户/主角名字(包括英文和拼音），中文和{{user}}是明令禁止的；同人角色本人的官方角色名仍按上方规则放在最前面。一定要保持同一人物在上下文中的形象一致性，不要丢失人物特性(如有异色瞳特征人物），涉及人物常见特征(如发色，瞳孔颜色等）的提示词请增加权重";
+      // IS-5:权重调整与排除元素示例同样按模式分支，避免与图生图指令块冲突
+      const weightRule = isImg2imgMode
+        ? " - 分配优先级：动作>表情>镜头>场景>道具>特效【如：跑动→{{{running}}}】\n - 本模式禁止对外观/服装/特征词增加权重，外观一律以参考图为准"
+        : " - 分配优先级：特征>动作>服饰>表情>特效【如：红发→{{{red hair}}}】\n - 涉及人物特征(如发色，瞳孔颜色等）的提示词请增加权重";
+      const exclusionRule = isImg2imgMode
+        ? "2. 排除元素：“no+Tag”明确强调排除，默认绘图“不提及也易生成”的元素【如：不要文字→no text；不要水印→no watermark】"
+        : "2. 排除元素：“no+Tag”明确强调排除，默认绘图“不提及也易生成”的元素【如：穿衣但不穿胸罩→no bra；穿短裙但不穿内裤→no panties】";
+
       // 2. 自动生图世界书
       const autoImageGenWIName = "自动生图";
       const imageGenCount = Math.min(
@@ -13636,24 +13696,17 @@ ${content}
             ? buildAutoImageGenNaturalContent(imageGenCount)
             : `<auto_image_gen>\n用户已开启自动生图。每次回复的正文中必须在合适的位置穿插图片，标准格式为：image###生成的提示词###，不能只输出文字正文；本轮必须生成${imageGenCount}张图片。
 使用绘画tag对场景人物进行特写，并保证一个场景拥有${imageGenCount}张图。
-注意:始终使用逗号分隔条目.另外请保证同一角色的特征，如发色，瞳孔颜色，体态，外貌的一致性.
+${genNote}
 使用 image###生成的提示词### 的格式！
-注意：如为nsfw场景，生成的提示词必须带上 nsfw 标签；如果是同人/已有作品角色，角色名仍必须放在最前面，nsfw 紧跟其后。
+${nsfwRule}
 
 ###提示词生成指导:
-第一重要的在于人物的特点,例如：white hair,性别：1girl,1boy,特色：mesugaki,ojousama,服装特色：china_dress,gothic,glasses,表情动作：smile,crying,tearing_clothes,disgust,angry,kubrick_stare,
-第二在于人物姿势：例如基础的站姿：standing,on back,on stomach,kneeling,做事情：bathing,cooking,fighting,showering,sleeping,spitting,walking,toilet_use,性爱姿势：grinding,fingering,licking_penis,
-第三在于动作细节:例如hands_on_own_chest,arms_behind_back,penis_grab,pulled_by_self,skirt_pull,clothes_lift,covering_chest_by_hand,finger_to_mouth,hands_on_lap,
-第四在于环境交互：例如：grinding,fingering,licking_penis,spread legs,wariza,sitting_in_tree,lotus_position,sitting_on_rock,sitting_on_stairs,folded,cameltoe,
-第五在于衣物细节:例如XX半脱，露出XX
-第六在于镜头描写，从XX往XX看，上半身还是下半身，例如从下往上的下半身，从上往下的上半身.lower_body,between_legs,between_breasts,pantyshot,looking_at_viewer,
-第七在于人物此时的位置，例如: diningroom, gym, bedroom, indoors, home, beach
-第八在于当前时间,morning, noon ，night, emphasize the lighting situation..
+${genGuide}
 
 <Tag_注意事项>
 #  Tag规范：禁用中文；原创角色禁止使用人物卡英文名；同人/已有作品角色必须把官方英文名或常用角色Tag放在提示词最前面
 1. 拆解复合词：【如：月下→moonlight,night】
-2. 排除元素：“no+Tag”明确强调排除，默认绘图“不提及也易生成”的元素【如：穿衣但不穿胸罩→no bra；穿短裙但不穿内裤→no panties】
+${exclusionRule}
 
 # 画面限制：仅描述画面中“客观存在的人/物/背景及正在发生的物理动作“，严禁加入人物内心想法、回忆、幻想、预告、计划，及比喻、抽象描述等非视觉化内容
 【如：构图变化：全身→仅下半身→移除"shirt, expression"等上半身Tag】
@@ -13665,11 +13718,9 @@ ${content}
 角色描述 以Character 1 Prompt为示例
 身份：
  - 主体标识：【如：girl、boy、other】
- - 同人角色：提示词第一项必须是英文全名\\\\(作品名\\\\)或常用角色Tag（下划线_替换成空格，/转义为\\\\），再接外貌、服装、动作等Tag
- - 原创角色：名字替换为"original"(也就是人物卡角色)
+${charIdentity}
 特征：
- - 基础特征：发型、发色、瞳色、罩杯
- - 专属特征：年龄、职业、性格、皮肤、种族等
+${charFeatures}
 **特征根据场景和图片的构图智能调整,冲突则临时移除**
 - 互动动作&细节：
   - 自身【如：hands on own ass、grab own ass、arms behind back、covering chest by hand】
@@ -13691,22 +13742,19 @@ ${content}
 # 权重调整：
 1. 增强权重：{Tag}
  - 功能：突出核心Tag，最多叠加6层（1层≈1.1倍、2层≈1.21倍、6层≈1.77倍）
- - 分配优先级：特征>动作>服饰>表情>特效【如：红发→{{{red hair}}}】
- - 涉及人物特征(如发色，瞳孔颜色等）的提示词请增加权重
+${weightRule}
 2. 减弱权重：[Tag]
  - 功能：弱化次要Tag或调整幅度，最多叠加2层（1层≈0.9倍、2层≈0.8倍）
  - 分配优先级：调整幅度【如：背景有 “花瓶”→但无需突出→[vase]】
 
- ### 核心一致性规范 (极其重要):
-1. **上下文一致性**：必须精准提取并保留角色当前的外貌，着装状态（如衣服是否破损、脱下）、环境光影、道具位置以及相对姿势。一旦在上文改变了状态，后续生图Tag必须绝对保持一致！
-2. **同人角色/固定外观一致性**：对于特定世界观或同人角色，提示词最前面必须放官方英文名或常用角色Tag，并带上极其准确的专属特征Tag组合。对常驻特征（如特定发型、异色瞳、专属装饰物等）加上最高权重 {{{Tag}}}，避免生成外形崩坏和不一致。
+${consistencyRule}
 
 <生成格式>
 image###生成的提示词###
 </生成格式>
 </Tag_智能调整>
 
-特别提示：出现user或主角参与的情况(如被口、手交），禁止出现主角的人物形象(脸部，头部）！必须使用第一视角(POV）相关提示词！且要作为Character  Prompt添加，禁止出现用户/主角名字(包括英文和拼音），中文和{{user}}是明令禁止的；同人角色本人的官方角色名仍按上方规则放在最前面。一定要保持同一人物在上下文中的形象一致性，不要丢失人物特性(如有异色瞳特征人物），涉及人物常见特征(如发色，瞳孔颜色等）的提示词请增加权重${buildViewTagPoolSection()}${charToolReminder}\n</auto_image_gen>`,
+${specialNote}${buildViewTagPoolSection()}${charToolReminder}\n</auto_image_gen>`,
         constant: true,
         enabled: false, // Default closed
         scope: "global",
