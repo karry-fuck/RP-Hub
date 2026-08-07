@@ -1543,6 +1543,7 @@ image###描述###
     const ACTIVE_TOOL_VECTOR_TYPE = "vector_memory";
     const ACTIVE_TOOL_KEYWORD_TYPE = "keyword_dialogue";
     const ACTIVE_TOOL_WEB_TYPE = "web_search";
+    const ACTIVE_TOOL_CHAR_TYPE = "char_tag_search";
     const ACTIVE_TOOL_MIN_RESULT_COUNT = 5;
     const ACTIVE_TOOL_DEFAULT_RESULT_COUNT = 5;
     const ACTIVE_TOOL_MAX_RESULT_COUNT = 10;
@@ -1613,6 +1614,10 @@ image###描述###
       "当本地上下文、角色记忆、关键词检索都不足以确认作品设定、同人资料、冷门角色、现实最新信息或网页资料时，单独输出 <tool_web_add:联网搜索内容或网页链接> 或 <tool_web_cover:联网搜索内容或网页链接>。先用具体关键词搜索，再按需读取真实 URL；查询优先包含作品名、角色名、设定名、站点、语言关键词或别名。多个独立信息点必须拆开，单次回复最多 5 个工具标签。本轮第一次联网搜索或首次读取 URL 一律用 add；看到结果后，若旧结果有用且需要保留就 add；若搜索结果偏题、太宽、重复、来源噪声多，或新搜索/网页读取能替代旧结果，应优先用 cover 清理上下文冗余，避免无关网页摘要干扰判断。";
     const ACTIVE_TOOL_WEB_DEFAULT_DISPLAY_DESCRIPTION =
       "通过 Tavily 联网搜索补充外部资料，也能进入链接读取网页详情，适合同人设定、作品百科、冷门角色和最新信息。";
+    const ACTIVE_TOOL_CHAR_DEFAULT_DESCRIPTION =
+      "仅当本回复将输出 image### 生图、且场景涉及 waiIllustrious 已知角色、需要精确 Danbooru tag 时调用；支持搜索任意角色（cos 其他角色服装/混搭）。单独输出 <tool_char_add:角色名> 或 <tool_char_cover:角色名>，查询写角色名（中文、英文或作品名均可，如 2B、emilia re:zero）。每行一个标签，单次回复最多 5 个工具标签，不写说明或 COT；搜到结果后把返回的英文角色 tag 拼进 image### 提示词最前面；搜不到（返回 empty 状态）时换更准确的角色名重查，或自行编 tag，不要编造不存在的角色。本工具只查本地角色库，需要联网查同人设定、作品百科或最新信息时改用 <tool_web>，勿用本工具。";
+    const ACTIVE_TOOL_CHAR_DEFAULT_DISPLAY_DESCRIPTION =
+      "从本地 waiIllustrious 角色库（5000+ 已知角色）按中文名/英文 tag 检索精确角色 tag，适合同人角色还原与 cos 其他角色服装。";
     const ACTIVE_TOOL_TAVILY_ENDPOINT = "https://api.tavily.com/search";
     const ACTIVE_TOOL_TAVILY_EXTRACT_ENDPOINT =
       "https://api.tavily.com/extract";
@@ -1653,10 +1658,22 @@ image###描述###
       displayDescription: ACTIVE_TOOL_WEB_DEFAULT_DISPLAY_DESCRIPTION,
       tavilyApiKey: "",
     });
+    const createDefaultCharTool = () => ({
+      id: "tool_char",
+      name: "角色 tag 检索",
+      enabled: false,
+      type: ACTIVE_TOOL_CHAR_TYPE,
+      callName: "tool_char",
+      resultCount: ACTIVE_TOOL_DEFAULT_RESULT_COUNT,
+      resultCountVersion: ACTIVE_TOOL_RESULT_COUNT_VERSION,
+      description: ACTIVE_TOOL_CHAR_DEFAULT_DESCRIPTION,
+      displayDescription: ACTIVE_TOOL_CHAR_DEFAULT_DISPLAY_DESCRIPTION,
+    });
     const getDefaultActiveToolDefinitions = () => [
       createDefaultActiveTool(),
       createDefaultGrepTool(),
       createDefaultWebTool(),
+      createDefaultCharTool(),
     ];
     const activeTools = ref(getDefaultActiveToolDefinitions());
 
@@ -4057,6 +4074,40 @@ image###描述###
     // 按英文 tag 精确取 tag_assist 追加词（如 "male"）
     const getTagAssistFor = (enTag) =>
       characterTagData.value?.tagAssist?.[enTag] || "";
+
+    // tool_char 专用搜索：懒加载 characters.json + 中英文/作品名宽容匹配（去标点归一化），
+    // 返回 top-N 含 tag_assist，供主动工具结果 XML 用。cn/en 命中优先于归一化命中。
+    const searchCharacterTagsForTool = async (query, limit = 5) => {
+      const data = await loadCharacterTagData();
+      if (!data || !query) return [];
+      const q = String(query).trim().toLowerCase();
+      if (!q) return [];
+      const norm = (s) =>
+        String(s || "")
+          .toLowerCase()
+          .replace(/[^\p{L}\p{N}]+/gu, " ");
+      const normQ = norm(q);
+      const hits = [];
+      for (const c of data.characters || []) {
+        const cn = String(c.cn || "");
+        const en = String(c.en || "");
+        const exact = cn.toLowerCase().includes(q) || en.toLowerCase().includes(q);
+        const normHit =
+          !exact &&
+          normQ &&
+          (norm(cn).includes(normQ) || norm(en).includes(normQ));
+        if (exact || normHit) {
+          hits.push({
+            cn,
+            en,
+            assist: getTagAssistFor(en) || "",
+            score: exact ? 2 : 1,
+          });
+        }
+      }
+      hits.sort((a, b) => b.score - a.score);
+      return hits.slice(0, Math.max(1, Number(limit) || 5));
+    };
 
     // 构造 buildFinalGenPrompt seam 输入（对话内占位与直出图共用）。
     // provider 映射 settings.imageProvider → seam settings.provider；
@@ -7939,6 +7990,10 @@ ${content}
       ["tool_web", "tool_web_add", "tool_web_cover"].includes(tool?.id) ||
       /tavily|联网搜索/i.test(String(tool?.name || ""));
 
+    const isCharActiveTool = (tool) =>
+      tool?.type === ACTIVE_TOOL_CHAR_TYPE ||
+      normalizeActiveToolBaseCallName(tool?.callName) === "tool_char";
+
     const getActiveToolDisplayDescription = (tool) =>
       tool?.displayDescription || "暂无说明";
 
@@ -8014,21 +8069,28 @@ ${content}
           const coverCallName = escapeXmlAttribute(labels.cover);
           const keywordTool = isKeywordActiveTool(tool);
           const webTool = isWebActiveTool(tool);
+          const charTool = isCharActiveTool(tool);
           const callPlaceholder = webTool
             ? "联网搜索内容或网页链接"
             : keywordTool
               ? "关键词"
-              : "检索内容";
+              : charTool
+                ? "角色名（中文/英文/作品名）"
+                : "检索内容";
           const returnLabel = webTool
             ? `${count}条联网搜索结果，或网页正文`
             : keywordTool
               ? `${count}条对话片段`
-              : `${count}条向量记忆`;
+              : charTool
+                ? `${count}个角色 tag（英文 + 中文名）`
+                : `${count}条向量记忆`;
           const descriptionFallback = webTool
             ? "通过 Tavily 联网搜索外部网页资料，返回带来源链接的搜索结果；当调用内容是网页链接时，读取该网页正文。"
             : keywordTool
               ? "按关键词精确匹配当前对话历史，抓取包含关键词的原文片段。"
-              : "按调用内容检索长期向量记忆。";
+              : charTool
+                ? "按角色名从本地 waiIllustrious 角色库检索精确英文角色 tag。"
+                : "按调用内容检索长期向量记忆。";
           const toolRules = webTool
             ? [
                 `用途：查外部网页、最新信息、冷门资料或本地资料无法确认的内容。`,
@@ -8039,10 +8101,15 @@ ${content}
                   `用途：精确查当前对话历史里的原文、名称、台词、物品、地点、设定词或前文细节。`,
                   `关键词尽量使用原文可能出现的词；同一信息点的同义词或别名可以放在同一次查询。`,
                 ]
-              : [
-                  `用途：检索长期记忆、旧剧情、历史设定、关系、人物状态、物品来历或用户暗指内容。`,
-                  `检索词优先包含人物、事件、物品、地点、时间线和关键状态。`,
-                ];
+              : charTool
+                ? [
+                    `用途：仅当本回复将输出 image### 生图、且场景需要精确角色 tag 时调用；支持任意角色（含 cos 其他角色服装）。`,
+                    `查询写角色名（中文、英文或作品名），如 <${addCallName}:2B>；把返回的英文角色 tag 拼进 image### 提示词最前面，需补性别时把 assist 追加其后。`,
+                  ]
+                : [
+                    `用途：检索长期记忆、旧剧情、历史设定、关系、人物状态、物品来历或用户暗指内容。`,
+                    `检索词优先包含人物、事件、物品、地点、时间线和关键状态。`,
+                  ];
           return [
             formatToolOpenTag({
               name: tool.name,
@@ -11459,7 +11526,7 @@ ${content}
     ) => {
       const text = String(resultContext || "").trim();
       const hasResultBody =
-        /<(?:description|error|memory_fragment|dialogue_fragment|web_source|web_page|failed_page)\b/i.test(
+        /<(?:description|error|memory_fragment|dialogue_fragment|web_source|web_page|failed_page|character_tag)\b/i.test(
           text,
         );
       if (
@@ -11593,6 +11660,31 @@ ${content}
         return [
           `<active_tool_result name="${title}" call="${callName}" mode="${modeValue}" query="${escapeXmlAttribute(cleanQuery)}" web_mode="search"${responseTime}>`,
           `  <description>以下是系统通过 Tavily 联网搜索得到的网页资料。${modeDescription}本段内容由系统插入最后一条用户消息结尾。请优先依据这些标题、链接和摘要继续回答；不要把搜索结果没有支持的内容说成事实。如果摘要仍不足以明确回答，请从结果中选择一个或多个最相关的真实 URL，追加调用 <${callName}:该URL> 进入网页读取正文，或换更具体的关键词继续搜索。可以多行调用多个 URL，系统会按顺序追加结果。</description>`,
+          formattedResults,
+          "</active_tool_result>",
+        ]
+          .filter(Boolean)
+          .join("\n");
+      }
+      if (isCharActiveTool(tool)) {
+        if (!Array.isArray(results) || results.length === 0) {
+          return [
+            `<active_tool_result name="${title}" call="${callName}" mode="${modeValue}" query="${escapeXmlAttribute(cleanQuery)}" status="empty">`,
+            `  <description>本次角色 tag 检索没有搜到匹配角色，也没有提供可作为答案依据的新证据。${modeDescription}本段内容已插入最后一条用户消息结尾。请换更准确的角色名（中文、英文或作品名）再次调用，或自行编 tag，不要编造不存在的角色。</description>`,
+            "</active_tool_result>",
+          ].join("\n");
+        }
+        const formattedResults = results
+          .map((item) => {
+            const assistValue = item.assist
+              ? ` assist="${escapeXmlAttribute(item.assist)}"`
+              : "";
+            return `  <character_tag cn="${escapeXmlAttribute(item.cn || "")}" en="${escapeXmlAttribute(item.en || "")}"${assistValue}/>`;
+          })
+          .join("\n");
+        return [
+          `<active_tool_result name="${title}" call="${callName}" mode="${modeValue}" query="${escapeXmlAttribute(cleanQuery)}">`,
+          `  <description>以下是系统从本地 waiIllustrious 角色库检索到的角色 tag。${modeDescription}本段内容由系统插入最后一条用户消息结尾。挑选与场景最匹配的角色，把对应 en（英文 Danbooru tag）拼进 image### 提示词最前面；需补性别时把 assist 追加在角色 tag 后。不要使用 cn（中文名）。</description>`,
           formattedResults,
           "</active_tool_result>",
         ]
@@ -11903,6 +11995,12 @@ ${content}
       ) {
         return ACTIVE_TOOL_VECTOR_TYPE;
       }
+      if (
+        toolCall?.toolType === ACTIVE_TOOL_CHAR_TYPE ||
+        baseCallName === "tool_char"
+      ) {
+        return ACTIVE_TOOL_CHAR_TYPE;
+      }
       return baseCallName || toolCall?.toolId || ACTIVE_TOOL_VECTOR_TYPE;
     };
 
@@ -11910,6 +12008,7 @@ ${content}
       const groupKey = getActiveToolUiGroupKey(toolCall);
       if (groupKey === ACTIVE_TOOL_KEYWORD_TYPE) return "关键词检索";
       if (groupKey === ACTIVE_TOOL_WEB_TYPE) return "Tavily 联网搜索";
+      if (groupKey === ACTIVE_TOOL_CHAR_TYPE) return "角色 tag 检索";
       if (groupKey === ACTIVE_TOOL_VECTOR_TYPE) return "向量记忆主动检索";
       return toolCall?.name || "向量记忆主动检索";
     };
@@ -11927,6 +12026,10 @@ ${content}
 
       if (groupKey === ACTIVE_TOOL_KEYWORD_TYPE) {
         return mode === "cover" ? "覆盖关键词检索" : "关键词检索";
+      }
+
+      if (groupKey === ACTIVE_TOOL_CHAR_TYPE) {
+        return mode === "cover" ? "覆盖角色检索" : "角色检索";
       }
 
       return mode === "cover" ? "覆盖向量检索" : "向量检索";
@@ -12466,11 +12569,16 @@ ${content}
                   toolCall.tool,
                   toolAbort.signal,
                 )
-              : await searchVectorMemoriesForTool(
-                  toolCall.query,
-                  toolCall.tool.resultCount,
-                  toolAbort.signal,
-                );
+              : isCharActiveTool(toolCall.tool)
+                ? await searchCharacterTagsForTool(
+                    toolCall.query,
+                    toolCall.tool.resultCount,
+                  )
+                : await searchVectorMemoriesForTool(
+                    toolCall.query,
+                    toolCall.tool.resultCount,
+                    toolAbort.signal,
+                  );
           if (toolAbort.signal.aborted)
             throw createAbortReason("Generation cancelled by user");
 
@@ -13475,6 +13583,12 @@ ${content}
 
     const enforceSpecialRules = () => {
       const imageProvider = settings.imageProvider || "sta1n";
+      // IS-3:tool_char 启用时，自动生图世界书附角色库调用提醒（仅 tag 模式；openai 自然语言版不注入）
+      const charToolReminder = getEnabledActiveTools().some((tool) =>
+        isCharActiveTool(tool),
+      )
+        ? "\n\n场景涉及已知角色（同人/作品角色或 cos 其他角色服装）需精确 tag 时，先单独输出 <tool_char_add:角色名> 查询角色库，再把返回的英文角色 tag 拼进 image### 提示词最前面。"
+        : "";
 
       // 1. NAI画图正则 (统一版本)
       //    实际替换已由 processRegex 特判走"占位 + 异步填图"，
@@ -13592,7 +13706,7 @@ image###生成的提示词###
 </生成格式>
 </Tag_智能调整>
 
-特别提示：出现user或主角参与的情况(如被口、手交），禁止出现主角的人物形象(脸部，头部）！必须使用第一视角(POV）相关提示词！且要作为Character  Prompt添加，禁止出现用户/主角名字(包括英文和拼音），中文和{{user}}是明令禁止的；同人角色本人的官方角色名仍按上方规则放在最前面。一定要保持同一人物在上下文中的形象一致性，不要丢失人物特性(如有异色瞳特征人物），涉及人物常见特征(如发色，瞳孔颜色等）的提示词请增加权重${buildViewTagPoolSection()}\n</auto_image_gen>`,
+特别提示：出现user或主角参与的情况(如被口、手交），禁止出现主角的人物形象(脸部，头部）！必须使用第一视角(POV）相关提示词！且要作为Character  Prompt添加，禁止出现用户/主角名字(包括英文和拼音），中文和{{user}}是明令禁止的；同人角色本人的官方角色名仍按上方规则放在最前面。一定要保持同一人物在上下文中的形象一致性，不要丢失人物特性(如有异色瞳特征人物），涉及人物常见特征(如发色，瞳孔颜色等）的提示词请增加权重${buildViewTagPoolSection()}${charToolReminder}\n</auto_image_gen>`,
         constant: true,
         enabled: false, // Default closed
         scope: "global",
@@ -13614,6 +13728,17 @@ image###生成的提示词###
       // 添加新的到首位
       worldInfo.value.unshift(autoImageGenWIContent);
     };
+
+    // IS-3:工具启用/关闭会改变自动生图世界书的 tool_char 提醒，触发重建
+    watch(
+      () =>
+        activeTools.value
+          .map((t) => `${t.id}:${t.enabled !== false}`)
+          .join("|"),
+      () => {
+        enforceSpecialRules();
+      },
+    );
 
     watch(
       () => settings.imageGenKey,
